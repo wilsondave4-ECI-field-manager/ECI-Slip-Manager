@@ -66,5 +66,5 @@ data class PersonalFundsSummary(
     val usedCents: Long,
     val reimbursedCents: Long
 ) {
-    val outstandingCents: Long get() = usedCents - reimbursedCents
+    val outstandingCents: Long get() = (usedCents - reimbursedCents).coerceAtLeast(0L)
 }
