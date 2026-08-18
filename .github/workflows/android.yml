@@ -2,8 +2,6 @@ name: Build Android APK
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main", "master" ]
 
 permissions:
   contents: write
@@ -40,5 +38,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ECI-Slip-Manager-v0.3-debug
+          name: ECI-Slip-Manager-v0.4-debug
           path: app/build/outputs/apk/debug/app-debug.apk
