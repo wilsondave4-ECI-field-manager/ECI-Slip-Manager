@@ -2,6 +2,7 @@ package za.co.eci.slipmanager.ui
 
 import android.Manifest
 import android.app.Activity
+import android.app.DatePickerDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -33,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.ReceiptLong
@@ -670,7 +672,7 @@ private fun EditSlipScreen(
         TextFieldSimple("Project / site", project, { project = it })
         TextFieldSimple("Payment reference", paymentRef, { paymentRef = it })
         AdvancePicker(advances, selectedAdvanceId, { selectedAdvanceId = it })
-        Text("VAT is never assumed automatically. Check it against the receipt before saving.", style = MaterialTheme.typography.bodySmall)
+        Text("VAT is read from the slip when printed. If it is not printed, the app may calculate the South African 15% VAT portion when the receipt supports it. The VAT field stays editable; enter 0.00 for a zero-rated/no-VAT purchase.", style = MaterialTheme.typography.bodySmall)
         Button(
             modifier = Modifier.fillMaxWidth(),
             onClick = {
@@ -864,10 +866,34 @@ private fun TextFieldSimple(label: String, value: String, onChange: (String) -> 
 
 @Composable
 private fun DateField(value: String, onChange: (String) -> Unit, error: Boolean = false) {
+    val context = LocalContext.current
+
+    fun openDatePicker() {
+        val initial = runCatching { LocalDate.parse(value.trim()) }.getOrNull() ?: LocalDate.now()
+        DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                onChange(LocalDate.of(year, month + 1, dayOfMonth).toString())
+            },
+            initial.year,
+            initial.monthValue - 1,
+            initial.dayOfMonth
+        ).show()
+    }
+
     OutlinedTextField(
-        value = value, onValueChange = onChange, label = { Text("Date (YYYY-MM-DD)") },
-        modifier = Modifier.fillMaxWidth(), singleLine = true, isError = error,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+        value = value,
+        onValueChange = onChange,
+        label = { Text("Date (YYYY-MM-DD)") },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        isError = error,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        trailingIcon = {
+            IconButton(onClick = ::openDatePicker) {
+                Icon(Icons.Default.CalendarMonth, contentDescription = "Choose date")
+            }
+        }
     )
 }
 

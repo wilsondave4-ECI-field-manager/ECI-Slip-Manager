@@ -9,7 +9,7 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
-
+import kotlin.math.abs
 
 data class ReceiptGuess(
     val supplier: String = "",
@@ -22,11 +22,18 @@ data class ReceiptGuess(
 )
 
 object ReceiptOcr {
+    private const val STANDARD_VAT = 15L
+
     private val recognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
     private val knownSuppliers = listOf(
+        "Belegi Workwear - Zambesi" to Regex("\\bbelegi\\b|\\bzambesi\\b", RegexOption.IGNORE_CASE),
+        "ABE Motor Spares" to Regex("\\babe[- ]?motor\\s+spares\\b", RegexOption.IGNORE_CASE),
+        "Eastway Motor Spares" to Regex("\\beastway\\s+motor\\s+spares\\b", RegexOption.IGNORE_CASE),
+        "Engen Platinum East" to Regex("\\bengen\\s+platinum\\s+east\\b", RegexOption.IGNORE_CASE),
+        "Bakwena Platinum Corridor" to Regex("\\bba?k[wv]ena\\s+platinum\\s+corridor\\b", RegexOption.IGNORE_CASE),
         "Builders" to Regex("\\bbuilders(?: warehouse| express)?\\b", RegexOption.IGNORE_CASE),
         "Cashbuild" to Regex("\\bcashbuild\\b", RegexOption.IGNORE_CASE),
         "BUCO" to Regex("\\bbuco\\b", RegexOption.IGNORE_CASE),
@@ -62,23 +69,52 @@ object ReceiptOcr {
 
     fun parse(text: String): ReceiptGuess {
         val lines = text.lines().map(::cleanLine).filter { it.isNotBlank() }
+        val joined = lines.joinToString(" ")
         val supplier = findSupplier(lines)
         val date = lines.asSequence().mapNotNull(::parseDateFromLine).firstOrNull()
         val receipt = findReceiptNumber(lines)
-        val total = findTotal(lines)
-        val vat = findLabeledAmount(
-            lines,
-            listOf("vat amount", "vat amt", "tax amount", "vat", "tax"),
-            reject = listOf("vat no", "vat number", "vat reg", "registration"),
-            preferLast = true
-        )
-        var subtotal = findLabeledAmount(
-            lines,
-            listOf("subtotal", "sub total", "total excl", "excl vat", "exclusive vat", "net amount", "amount excl"),
-            reject = emptyList(),
-            preferLast = false
-        )
-        if (subtotal == null && total != null && vat != null && total >= vat) subtotal = total - vat
+
+        var total = findTotal(lines)
+        var subtotal = findSubtotal(lines)
+        var vat = findExplicitVat(lines)
+
+        val fuelZeroRated = isFuelLevyReceipt(joined) && vat == null && !mentionsFifteenPercentVat(joined)
+        val saysVatInclusive = mentionsFifteenPercentVat(joined) || Regex("\\bvat\\s+(?:incl(?:usive|uded)?|inclusive)\\b", RegexOption.IGNORE_CASE).containsMatchIn(joined)
+        val taxInvoiceEvidence = Regex("\\btax\\s+invoice\\b|\\bvat\\s+(?:reg(?:istration)?\\s*)?no\\b|\\bvat\\s+number\\b", RegexOption.IGNORE_CASE).containsMatchIn(joined)
+
+        if (total == null && saysVatInclusive) {
+            total = lines.asSequence()
+                .filter { mentionsFifteenPercentVat(it) }
+                .flatMap { parseAmounts(it).asSequence() }
+                .filter { it > 0 }
+                .maxOrNull()
+        }
+
+        if (vat != null && total != null && (vat < 0 || vat > total)) vat = null
+
+        if (fuelZeroRated && total != null) {
+            vat = 0L
+            if (subtotal == null) subtotal = total
+        } else if (vat == null && subtotal != null && total != null && total >= subtotal) {
+            val difference = total - subtotal
+            if (difference > 0 && approximatelyStandardVat(subtotal, difference)) {
+                vat = difference
+            }
+        }
+
+        if (vat == null && total != null && saysVatInclusive) {
+            vat = inclusiveVat(total)
+            if (subtotal == null) subtotal = total - vat
+        }
+
+        if (vat == null && total != null && taxInvoiceEvidence && !fuelZeroRated) {
+            vat = inclusiveVat(total)
+            if (subtotal == null) subtotal = total - vat
+        }
+
+        if (subtotal == null && total != null && vat != null && vat in 0..total) {
+            subtotal = total - vat
+        }
 
         return ReceiptGuess(
             supplier = supplier,
@@ -97,17 +133,18 @@ object ReceiptOcr {
         .trim()
 
     private fun findSupplier(lines: List<String>): String {
-        val joinedTop = lines.take(16).joinToString(" ")
+        val joinedTop = lines.take(18).joinToString(" ")
         knownSuppliers.firstOrNull { (_, pattern) -> pattern.containsMatchIn(joinedTop) }?.let { return it.first }
 
         val rejects = listOf(
-            "tax invoice", "invoice", "receipt", "till", "cashier", "vat", "reg no", "registration",
-            "telephone", "tel:", "www.", "http", "thank you", "customer", "date", "time", "branch",
-            "transaction", "duplicate", "copy", "subtotal", "total", "amount due", "change", "cash",
-            "street", " road", " rd", " avenue", " ave", " corner", "cnr", "po box"
+            "tax invoice", "invoice", "receipt", "customer copy", "till", "cashier", "vat", "reg no",
+            "registration", "telephone", "tel:", "www.", "http", "thank you", "customer", "date", "time",
+            "branch", "transaction", "duplicate", "copy", "subtotal", "total", "amount due", "change",
+            "cash", "street", " road", " rd", " avenue", " ave", " corner", "cnr", "po box", "invoice from",
+            "invoice to", "deliver to", "sales rep", "payment method"
         )
 
-        return lines.take(12).mapIndexedNotNull { index, raw ->
+        return lines.take(14).mapIndexedNotNull { index, raw ->
             val line = raw.trim(' ', '-', '_', '*', ':', '.', ',')
             val lower = line.lowercase(Locale.ROOT)
             val letters = line.count(Char::isLetter)
@@ -116,24 +153,30 @@ object ReceiptOcr {
             if (line.contains('@') || line.count { it == '/' } > 1) return@mapIndexedNotNull null
             val upperLetters = line.count { it.isLetter() && it.isUpperCase() }
             val upperRatio = if (letters == 0) 0.0 else upperLetters.toDouble() / letters
-            var score = 12.0 - index * 0.7
+            var score = 14.0 - index * 0.75
             if (upperRatio > 0.65) score += 2.5
-            if (Regex("\\b(pty|ltd|cc|trading|hardware|motors|engineering|supplies|electrical)\\b", RegexOption.IGNORE_CASE).containsMatchIn(line)) score += 2.0
+            if (Regex("\\b(pty|ltd|cc|trading|hardware|motors|motor spares|engineering|supplies|electrical|workwear)\\b", RegexOption.IGNORE_CASE).containsMatchIn(line)) score += 2.5
             if (line.length in 4..35) score += 1.0
             line to score
-        }.maxByOrNull { it.second }?.takeIf { it.second >= 6.0 }?.first.orEmpty().take(80)
+        }.maxByOrNull { it.second }?.takeIf { it.second >= 6.5 }?.first.orEmpty().take(80)
     }
 
     private fun findReceiptNumber(lines: List<String>): String {
-        val labels = listOf("invoice no", "invoice #", "receipt no", "receipt #", "slip no", "document no", "trans no", "transaction no", "reference", "ref")
+        val labels = listOf(
+            "invoice no", "invoice #", "receipt no", "receipt #", "slip no", "document no", "doc no",
+            "trans no", "transaction no", "sales ord", "reference", "ref"
+        )
         for (i in lines.indices) {
             val line = lines[i]
             val lower = line.lowercase(Locale.ROOT)
             if (labels.none(lower::contains)) continue
-            val m = Regex("(?:no\\.?|number|#|ref\\.?|invoice|receipt|slip|document|trans(?:action)?)\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9/-]{2,})", RegexOption.IGNORE_CASE).find(line)
+            val m = Regex(
+                "(?:no\\.?|number|#|ref\\.?|invoice|receipt|slip|document|doc|trans(?:action)?|sales\\s*ord)\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9/.-]{2,})",
+                RegexOption.IGNORE_CASE
+            ).find(line)
             if (m != null) return m.groupValues[1].take(40)
             if (i + 1 < lines.size) {
-                val next = Regex("^[A-Z0-9][A-Z0-9/-]{2,}$", RegexOption.IGNORE_CASE).find(lines[i + 1])
+                val next = Regex("^[A-Z0-9][A-Z0-9/.-]{2,}$", RegexOption.IGNORE_CASE).find(lines[i + 1])
                 if (next != null) return next.value.take(40)
             }
         }
@@ -141,24 +184,60 @@ object ReceiptOcr {
     }
 
     private fun findTotal(lines: List<String>): Long? {
-        val labels = listOf("grand total", "amount due", "balance due", "total due", "invoice total", "nett total", "net total", "total")
-        val reject = listOf("subtotal", "sub total", "total savings", "total discount", "total items", "vat total", "total vat")
+        val labels = listOf(
+            "total including", "total incl", "grand total", "amount due", "balance due",
+            "invoice total", "nett total", "net total", "total"
+        )
+        val reject = listOf(
+            "subtotal", "sub total", "total savings", "total discount", "total items",
+            "vat total", "total vat", "outstanding amnt", "outstanding amount"
+        )
         for (label in labels) {
-            for (i in lines.indices) {
+            for (i in lines.indices.reversed()) {
                 val lower = lines[i].lowercase(Locale.ROOT)
                 if (!lower.contains(label) || reject.any(lower::contains)) continue
-                amountAfterLabel(lines, i, label, preferLast = false)?.let { if (it > 0) return it }
+                amountAfterLabel(lines, i, label, preferLast = true)?.let { if (it > 0) return it }
+            }
+        }
+
+        for (i in lines.indices.reversed()) {
+            val lower = lines[i].lowercase(Locale.ROOT)
+            if (lower.contains("amount") && !lower.contains("vat") && !lower.contains("discount")) {
+                amountAfterLabel(lines, i, "amount", preferLast = true)?.let { if (it > 0) return it }
             }
         }
 
         val start = (lines.size / 3).coerceAtLeast(0)
-        val fallbackReject = listOf("change", "cash", "tender", "card", "eft", "saving", "discount", "%", "qty", "quantity")
+        val fallbackReject = listOf(
+            "change", "cash", "tender", "card", "eft", "saving", "discount", "%", "qty", "quantity",
+            "vat no", "vat reg", "account", "acc #"
+        )
         return lines.drop(start)
             .filterNot { line -> fallbackReject.any(line.lowercase(Locale.ROOT)::contains) }
             .flatMap(::parseAmounts)
             .filter { it in 1..100_000_000L }
             .maxOrNull()
     }
+
+    private fun findSubtotal(lines: List<String>): Long? = findLabeledAmount(
+        lines = lines,
+        labels = listOf(
+            "subtotal", "sub total", "total excl", "total excluding", "excl vat", "excluding vat",
+            "exclusive vat", "net amount", "nett amount", "amount excl", "amount excluding"
+        ),
+        reject = listOf("including", "incl vat"),
+        preferLast = true
+    )
+
+    private fun findExplicitVat(lines: List<String>): Long? = findLabeledAmount(
+        lines = lines,
+        labels = listOf("vat amount", "vat amt", "tax amount", "vat"),
+        reject = listOf(
+            "vat no", "vat number", "vat reg", "registration", "including", "inclusive",
+            "15% vat", "15 % vat", "15o/o", "% vat", "vat rate"
+        ),
+        preferLast = true
+    )
 
     private fun findLabeledAmount(
         lines: List<String>,
@@ -185,8 +264,11 @@ object ReceiptOcr {
             val same = parseAmounts(tail)
             if (same.isNotEmpty()) return if (preferLast) same.last() else same.first()
         }
-        for (offset in 1..2) {
+
+        for (offset in 1..4) {
             val next = lines.getOrNull(index + offset) ?: break
+            val lowerNext = next.lowercase(Locale.ROOT)
+            if (offset > 1 && Regex("\\b(subtotal|vat amount|total|invoice discount)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lowerNext)) continue
             val values = parseAmounts(next)
             if (values.isNotEmpty()) return if (preferLast) values.last() else values.first()
         }
@@ -199,7 +281,10 @@ object ReceiptOcr {
             .replace(Regex("(?<=[.,])[Oo](?=\\d)"), "0")
             .replace(Regex("(?<=\\d)\\s*([.,])\\s*(?=\\d{2}\\b)"), "$1")
 
-        val regex = Regex("(?:ZAR\\s*|R\\s*)?(-?\\d{1,3}(?:[ '\\u00A0,.]\\d{3})*(?:[.,]\\d{2})|-?\\d+(?:[.,]\\d{2}))", RegexOption.IGNORE_CASE)
+        val regex = Regex(
+            "(?:ZAR\\s*|R\\s*)?(-?\\d{1,3}(?:[ '\\u00A0,.]\\d{3})*(?:[.,]\\d{2})|-?\\d+(?:[.,]\\d{2}))",
+            RegexOption.IGNORE_CASE
+        )
         return regex.findAll(line).mapNotNull { match ->
             val after = line.substring((match.range.last + 1).coerceAtMost(line.length)).trimStart()
             if (after.startsWith("%")) return@mapNotNull null
@@ -215,6 +300,25 @@ object ReceiptOcr {
             normalized.toBigDecimalOrNull()?.movePointRight(2)?.toLong()
         }.filter { it in -100_000_000L..100_000_000L }.toList()
     }
+
+    private fun inclusiveVat(totalCents: Long): Long =
+        ((totalCents * STANDARD_VAT) + 57L) / 115L
+
+    private fun approximatelyStandardVat(subtotalCents: Long, vatCents: Long): Boolean {
+        if (subtotalCents <= 0 || vatCents <= 0) return false
+        val expected = ((subtotalCents * STANDARD_VAT) + 50L) / 100L
+        val tolerance = maxOf(3L, expected / 50L)
+        return abs(vatCents - expected) <= tolerance
+    }
+
+    private fun mentionsFifteenPercentVat(text: String): Boolean =
+        Regex(
+            "(?:including|incl(?:uding|usive)?\\.?)?\\s*1[5S]\\s*(?:%|o/o)\\s*vat|vat\\s*(?:inclusive|incl(?:uded|usive)?\\.?)",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(text)
+
+    private fun isFuelLevyReceipt(text: String): Boolean =
+        Regex("\\b(unleaded|petrol|diesel)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)
 
     private fun parseDateFromLine(line: String): LocalDate? {
         val patterns = listOf(
