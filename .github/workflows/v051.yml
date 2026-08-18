@@ -67,24 +67,6 @@ jobs:
           after = after.replace(old_reason, 'TextFieldSimple("Reason for money returned", notes, { notes = it })', 1)
           text = before + marker + after
 
-          old_empty = '''        if (visibleSlips.isEmpty()) {
-              item { InfoCard("No slips for this advance", "Scan a slip and it will be allocated to the newest advance by default.") }
-          } else {'''.replace('              ', '            ')
-          new_empty = '''        if (visibleSlips.isEmpty()) {
-              item {
-                  InfoCard(
-                      "No recent slips",
-                      if (selectedAdvance?.archived == true)
-                          "This advance is archived. Its slips remain stored but are removed from Recent slips."
-                      else
-                          "Scan a slip and it will be allocated to the newest active advance by default."
-                  )
-              }
-          } else {'''.replace('              ', '            ')
-          if old_empty not in text:
-              raise SystemExit('recent slips empty state not found')
-          text = text.replace(old_empty, new_empty, 1)
-
           old_default = '        mutableStateOf(original.advanceId ?: if (original.id == 0L) advances.firstOrNull()?.id else null)'
           new_default = '        mutableStateOf(original.advanceId ?: if (original.id == 0L) advances.firstOrNull { !it.archived }?.id else null)'
           if old_default not in text:
