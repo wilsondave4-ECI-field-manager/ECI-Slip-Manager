@@ -34,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Description
@@ -94,7 +95,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
-private enum class Screen { HOME, ADVANCES, SLIPS, REPORTS, SETTINGS, EDIT_SLIP }
+private enum class Screen { HOME, ADVANCES, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
 
 @Composable
 fun SlipApp(repository: SlipRepository) {
@@ -193,6 +194,7 @@ fun SlipApp(repository: SlipRepository) {
                     Screen.ADVANCES -> "Money Received"
                     Screen.SLIPS -> "Slips"
                     Screen.REPORTS -> "Reports & Export"
+                    Screen.ARCHIVE -> "Archive"
                     Screen.SETTINGS -> "Settings"
                     Screen.EDIT_SLIP -> if ((editingSlip?.id ?: 0L) == 0L) "Review Slip" else "Edit Slip"
                 },
@@ -201,7 +203,7 @@ fun SlipApp(repository: SlipRepository) {
             )
         },
         bottomBar = {
-            if (screen in setOf(Screen.HOME, Screen.SLIPS, Screen.REPORTS)) {
+            if (screen in setOf(Screen.HOME, Screen.SLIPS, Screen.REPORTS, Screen.ARCHIVE)) {
                 BottomNav(screen, onNavigate = { screen = it }, onScan = ::startScan)
             }
         },
@@ -229,11 +231,12 @@ fun SlipApp(repository: SlipRepository) {
                     onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
                 )
                 Screen.REPORTS -> ReportsScreen(repository, advances, slips, returns)
+                Screen.ARCHIVE -> ArchiveScreen(repository, advances, slips, returns)
                 Screen.SETTINGS -> SettingsScreen(repository, advances, slips, returns)
                 Screen.EDIT_SLIP -> editingSlip?.let { original ->
                     EditSlipScreen(
                         original = original,
-                        advances = advances,
+                        advances = advances.filter { !it.archived || repository.reconciliation(it.id).outstandingCents != 0L },
                         onSave = {
                             repository.saveSlip(it)
                             editingSlip = null
@@ -328,6 +331,11 @@ private fun BottomNav(screen: Screen, onNavigate: (Screen) -> Unit, onScan: () -
             onClick = { onNavigate(Screen.REPORTS) },
             icon = { Icon(Icons.Default.Description, null) }, label = { Text("Reports") }
         )
+        NavigationBarItem(
+            selected = screen == Screen.ARCHIVE,
+            onClick = { onNavigate(Screen.ARCHIVE) },
+            icon = { Icon(Icons.Default.Archive, null) }, label = { Text("Archive") }
+        )
     }
 }
 
@@ -340,12 +348,15 @@ private fun HomeScreen(
     onSlip: (Slip) -> Unit,
     onScan: () -> Unit
 ) {
-    var selectedAdvanceId by remember { mutableStateOf<Long?>(null) }
-    LaunchedEffect(advances) {
-        val newest = advances.firstOrNull()?.id
-        if (selectedAdvanceId == null || advances.none { it.id == selectedAdvanceId }) selectedAdvanceId = newest
+    val dashboardAdvances = advances.filter { advance ->
+        !advance.archived || repository.reconciliation(advance.id).outstandingCents != 0L
     }
-    val selectedAdvance = advances.firstOrNull { it.id == selectedAdvanceId }
+    var selectedAdvanceId by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(dashboardAdvances) {
+        val newest = dashboardAdvances.firstOrNull { !it.archived }?.id ?: dashboardAdvances.firstOrNull()?.id
+        if (selectedAdvanceId == null || dashboardAdvances.none { it.id == selectedAdvanceId }) selectedAdvanceId = newest
+    }
+    val selectedAdvance = dashboardAdvances.firstOrNull { it.id == selectedAdvanceId }
     val rec = selectedAdvanceId?.let { repository.reconciliation(it) } ?: repository.reconciliation()
     val visibleSlips = if (selectedAdvanceId == null) slips else slips.filter { it.advanceId == selectedAdvanceId }
 
@@ -362,7 +373,7 @@ private fun HomeScreen(
                     selectedAdvance?.let {
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "${it.project.ifBlank { "Advance #${it.id}" }} • ${dateText(it.dateEpochDay)}",
+                            "${it.project.ifBlank { "Advance #${it.id}" }} • ${dateText(it.dateEpochDay)}${if (it.archived) " • ARCHIVED" else ""}",
                             color = MaterialTheme.colorScheme.onPrimary,
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -396,7 +407,7 @@ private fun HomeScreen(
                 Text("SCAN SLIP", fontWeight = FontWeight.Bold)
             }
         }
-        if (advances.isEmpty()) item { InfoCard("Start here", "Add the money paid into your account, then scan slips against it.") }
+        if (dashboardAdvances.isEmpty()) item { InfoCard("Start here", "Add the money paid into your account, then scan slips against it.") }
 
         val incomplete = visibleSlips.filterNot { it.isComplete }.take(5)
         if (incomplete.isNotEmpty()) {
@@ -404,11 +415,11 @@ private fun HomeScreen(
             items(incomplete, key = { it.id }) { slip -> SlipCard(slip, onSlip) }
         }
 
-        if (advances.isNotEmpty()) {
+        if (dashboardAdvances.isNotEmpty()) {
             item { SectionTitle("Loaded advances") }
             item {
                 AdvanceSelectorRow(
-                    advances = advances,
+                    advances = dashboardAdvances,
                     selectedId = selectedAdvanceId,
                     onSelected = { selectedAdvanceId = it }
                 )
@@ -430,18 +441,19 @@ private fun AdvanceSelectorRow(advances: List<Advance>, selectedId: Long?, onSel
         items(advances, key = { it.id }) { advance ->
             val selected = advance.id == selectedId
             val label = advance.project.ifBlank { "Advance #${advance.id}" }
+            val archivedMark = if (advance.archived) " • Archived" else ""
             if (selected) {
                 Button(onClick = { onSelected(advance.id) }) {
                     Column {
                         Text(label, fontWeight = FontWeight.Bold, maxLines = 1)
-                        Text("${dateText(advance.dateEpochDay)} • ${money(advance.amountCents)}", style = MaterialTheme.typography.labelSmall)
+                        Text("${dateText(advance.dateEpochDay)} • ${money(advance.amountCents)}$archivedMark", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             } else {
                 OutlinedButton(onClick = { onSelected(advance.id) }) {
                     Column {
                         Text(label, maxLines = 1)
-                        Text("${dateText(advance.dateEpochDay)} • ${money(advance.amountCents)}", style = MaterialTheme.typography.labelSmall)
+                        Text("${dateText(advance.dateEpochDay)} • ${money(advance.amountCents)}$archivedMark", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
@@ -482,7 +494,9 @@ private fun AdvancesScreen(
     var notes by remember { mutableStateOf("") }
     var editingAdvance by remember { mutableStateOf<Advance?>(null) }
     var deleteAdvance by remember { mutableStateOf<Advance?>(null) }
+    var archiveAdvance by remember { mutableStateOf<Advance?>(null) }
     var returnAdvance by remember { mutableStateOf<Advance?>(null) }
+    val activeAdvances = advances.filterNot { it.archived }
     val context = LocalContext.current
 
     fun clearForm() {
@@ -531,7 +545,9 @@ private fun AdvancesScreen(
                                 amountCents = cents,
                                 reference = reference.trim(),
                                 project = project.trim(),
-                                notes = notes.trim()
+                                notes = notes.trim(),
+                                archived = editingAdvance?.archived ?: false,
+                                archivedAtMillis = editingAdvance?.archivedAtMillis
                             )
                         )
                         clearForm()
@@ -543,8 +559,8 @@ private fun AdvancesScreen(
         if (editingAdvance != null) {
             item { OutlinedButton(onClick = { clearForm() }, modifier = Modifier.fillMaxWidth()) { Text("Cancel correction") } }
         }
-        if (advances.isNotEmpty()) item { SectionTitle("Advances") }
-        items(advances, key = { it.id }) { advance ->
+        if (activeAdvances.isNotEmpty()) item { SectionTitle("Advances") }
+        items(activeAdvances, key = { it.id }) { advance ->
             val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.totalCents }
             val returned = returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
             Card {
@@ -559,7 +575,10 @@ private fun AdvancesScreen(
                         TextButton(onClick = { editingAdvance = advance }) { Text("Edit") }
                         TextButton(onClick = { deleteAdvance = advance }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
                     }
-                    TextButton(onClick = { returnAdvance = advance }) { Text("Record money returned") }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        TextButton(onClick = { returnAdvance = advance }) { Text("Return money") }
+                        TextButton(onClick = { archiveAdvance = advance }) { Text("Archive") }
+                    }
                 }
             }
         }
@@ -590,6 +609,30 @@ private fun AdvancesScreen(
             dismissButton = { TextButton(onClick = { deleteAdvance = null }) { Text("Cancel") } }
         )
     }
+
+    archiveAdvance?.let { advance ->
+        val balance = advance.amountCents - slips.filter { it.advanceId == advance.id }.sumOf { it.totalCents } - returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
+        AlertDialog(
+            onDismissRequest = { archiveAdvance = null },
+            title = { Text("Archive this advance?") },
+            text = {
+                Text(
+                    if (balance == 0L)
+                        "This advance is settled. It will move out of the active dashboard and remain available in Archive."
+                    else
+                        "This advance still has ${money(balance)} outstanding. It will be archived but will remain visible on Home until the balance reaches R0.00."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    repository.archiveAdvance(advance, true)
+                    archiveAdvance = null
+                    onDone()
+                }) { Text("Archive") }
+            },
+            dismissButton = { TextButton(onClick = { archiveAdvance = null }) { Text("Cancel") } }
+        )
+    }
 }
 
 @Composable
@@ -617,6 +660,67 @@ private fun ReturnMoneyDialog(advance: Advance, onDismiss: () -> Unit, onSave: (
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
+}
+
+
+@Composable
+private fun ArchiveScreen(
+    repository: SlipRepository,
+    advances: List<Advance>,
+    slips: List<Slip>,
+    returns: List<MoneyReturn>
+) {
+    val archivedAdvances = advances.filter { it.archived }.sortedWith(
+        compareByDescending<Advance> { it.archivedAtMillis ?: 0L }.thenByDescending { it.dateEpochDay }
+    )
+    var returnAdvance by remember { mutableStateOf<Advance?>(null) }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            InfoCard(
+                "Archived advances",
+                "Settled advances are removed from Home. Archived advances with an outstanding balance remain on Home until they reach R0.00."
+            )
+        }
+        if (archivedAdvances.isEmpty()) {
+            item { InfoCard("Archive is empty", "Archive an advance after its report has been sent.") }
+        } else {
+            items(archivedAdvances, key = { it.id }) { advance ->
+                val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.totalCents }
+                val returned = returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
+                val balance = advance.amountCents - spent - returned
+                Card {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        Text(advance.project.ifBlank { "Advance #${advance.id}" }, fontWeight = FontWeight.Bold)
+                        Text("${dateText(advance.dateEpochDay)} • ${advance.reference.ifBlank { "No reference" }}")
+                        Spacer(Modifier.height(6.dp))
+                        Text("Received ${money(advance.amountCents)}")
+                        Text("Slips ${money(spent)} • Returned ${money(returned)}")
+                        Text(
+                            if (balance == 0L) "SETTLED • R0.00" else "OUTSTANDING • ${money(balance)}",
+                            fontWeight = FontWeight.Bold,
+                            color = if (balance == 0L) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            TextButton(onClick = { returnAdvance = advance }) { Text("Return money") }
+                            TextButton(onClick = { repository.archiveAdvance(advance, false) }) { Text("Restore active") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    returnAdvance?.let { advance ->
+        ReturnMoneyDialog(advance, onDismiss = { returnAdvance = null }) { item ->
+            repository.saveReturn(item)
+            returnAdvance = null
+        }
+    }
 }
 
 @Composable
