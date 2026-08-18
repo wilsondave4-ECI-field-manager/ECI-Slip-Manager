@@ -8,14 +8,7 @@ plugins {
 
 val releaseStorePath = System.getenv("ECI_KEYSTORE_PATH")
 val releaseStorePassword = System.getenv("ECI_KEYSTORE_PASSWORD")
-val releaseKeyAlias = System.getenv("ECI_KEY_ALIAS")
-val releaseKeyPassword = System.getenv("ECI_KEY_PASSWORD")
-val hasReleaseSigning = listOf(
-    releaseStorePath,
-    releaseStorePassword,
-    releaseKeyAlias,
-    releaseKeyPassword
-).all { !it.isNullOrBlank() }
+val hasReleaseSigning = !releaseStorePath.isNullOrBlank() && !releaseStorePassword.isNullOrBlank()
 
 android {
     namespace = "za.co.eci.slipmanager"
@@ -34,8 +27,8 @@ android {
             create("release") {
                 storeFile = file(releaseStorePath!!)
                 storePassword = releaseStorePassword
-                keyAlias = releaseKeyAlias
-                keyPassword = releaseKeyPassword
+                keyAlias = "eci-slip-manager"
+                keyPassword = releaseStorePassword
                 storeType = "PKCS12"
             }
         }
