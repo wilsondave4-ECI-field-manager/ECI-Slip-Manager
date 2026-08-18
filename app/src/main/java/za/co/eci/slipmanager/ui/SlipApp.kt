@@ -46,6 +46,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -83,6 +84,8 @@ import androidx.core.content.FileProvider
 import za.co.eci.slipmanager.backup.BackupManager
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.MoneyReturn
+import za.co.eci.slipmanager.data.PaymentType
+import za.co.eci.slipmanager.data.Reimbursement
 import za.co.eci.slipmanager.data.Slip
 import za.co.eci.slipmanager.data.SlipRepository
 import za.co.eci.slipmanager.ocr.ReceiptGuess
@@ -104,6 +107,7 @@ fun SlipApp(repository: SlipRepository) {
     val advances by repository.advances.collectAsState()
     val slips by repository.slips.collectAsState()
     val returns by repository.returns.collectAsState()
+    val reimbursements by repository.reimbursements.collectAsState()
 
     var screen by remember { mutableStateOf(Screen.HOME) }
     var editingSlip by remember { mutableStateOf<Slip?>(null) }
@@ -230,9 +234,9 @@ fun SlipApp(repository: SlipRepository) {
                     slips = slips,
                     onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
                 )
-                Screen.REPORTS -> ReportsScreen(repository, advances, slips, returns)
+                Screen.REPORTS -> ReportsScreen(repository, advances, slips, returns, reimbursements)
                 Screen.ARCHIVE -> ArchiveScreen(repository, advances, slips, returns)
-                Screen.SETTINGS -> SettingsScreen(repository, advances, slips, returns)
+                Screen.SETTINGS -> SettingsScreen(repository, advances, slips, returns, reimbursements)
                 Screen.EDIT_SLIP -> editingSlip?.let { original ->
                     EditSlipScreen(
                         original = original,
@@ -357,7 +361,10 @@ private fun HomeScreen(
         if (selectedAdvanceId == null || dashboardAdvances.none { it.id == selectedAdvanceId }) selectedAdvanceId = newest
     }
     val selectedAdvance = dashboardAdvances.firstOrNull { it.id == selectedAdvanceId }
-    val rec = selectedAdvanceId?.let { repository.reconciliation(it) } ?: repository.reconciliation()
+    val rec = selectedAdvanceId?.let { repository.reconciliation(it) } ?: repository.activeReconciliation()
+    val activeRec = repository.activeReconciliation()
+    val personal = repository.personalFundsSummary()
+    var showReimbursement by remember { mutableStateOf(false) }
     val activeAdvanceIds = advances.asSequence().filterNot { it.archived }.map { it.id }.toSet()
     val visibleSlips = when {
         selectedAdvanceId == null -> slips.filter { it.advanceId != null && it.advanceId in activeAdvanceIds }
@@ -395,14 +402,29 @@ private fun HomeScreen(
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MiniTotal("Received", rec.receivedCents, Modifier.weight(1f))
-                MiniTotal("Slips", rec.slipsCents, Modifier.weight(1f))
+                MiniTotal("Received", activeRec.receivedCents, Modifier.weight(1f))
+                MiniTotal("Slips", activeRec.slipsCents, Modifier.weight(1f))
             }
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MiniTotal("Returned", rec.returnedCents, Modifier.weight(1f))
+                MiniTotal("Returned", activeRec.returnedCents, Modifier.weight(1f))
                 MiniTotal("Slips", visibleSlips.size.toLong(), Modifier.weight(1f), asCount = true)
+            }
+        }
+        item {
+            Card {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("MY OWN MONEY", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text("Used ${money(personal.usedCents)}")
+                    Text("Reimbursed ${money(personal.reimbursedCents)}")
+                    Text("ECI owes me ${money(personal.outstandingCents)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    if (personal.outstandingCents > 0L) {
+                        OutlinedButton(onClick = { showReimbursement = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("RECORD REIMBURSEMENT")
+                        }
+                    }
+                }
             }
         }
         item {
@@ -436,6 +458,16 @@ private fun HomeScreen(
             item { InfoCard("No slips for this advance", "Scan a slip and it will be allocated to the newest advance by default.") }
         } else {
             items(visibleSlips.take(8), key = { it.id }) { slip -> SlipCard(slip, onSlip) }
+        }
+    }
+
+    if (showReimbursement) {
+        ReimbursementDialog(
+            maxOutstandingCents = personal.outstandingCents,
+            onDismiss = { showReimbursement = false }
+        ) { item ->
+            repository.saveReimbursement(item)
+            showReimbursement = false
         }
     }
 }
@@ -566,7 +598,7 @@ private fun AdvancesScreen(
         }
         if (activeAdvances.isNotEmpty()) item { SectionTitle("Advances") }
         items(activeAdvances, key = { it.id }) { advance ->
-            val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.totalCents }
+            val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.companyPaidCents }
             val returned = returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
             Card {
                 Column(Modifier.fillMaxWidth().padding(14.dp)) {
@@ -616,7 +648,7 @@ private fun AdvancesScreen(
     }
 
     archiveAdvance?.let { advance ->
-        val balance = advance.amountCents - slips.filter { it.advanceId == advance.id }.sumOf { it.totalCents } - returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
+        val balance = advance.amountCents - slips.filter { it.advanceId == advance.id }.sumOf { it.companyPaidCents } - returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
         AlertDialog(
             onDismissRequest = { archiveAdvance = null },
             title = { Text("Archive this advance?") },
@@ -638,6 +670,45 @@ private fun AdvancesScreen(
             dismissButton = { TextButton(onClick = { archiveAdvance = null }) { Text("Cancel") } }
         )
     }
+}
+
+@Composable
+private fun ReimbursementDialog(
+    maxOutstandingCents: Long,
+    onDismiss: () -> Unit,
+    onSave: (Reimbursement) -> Unit
+) {
+    var amount by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf(LocalDate.now().toString()) }
+    var reference by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Record reimbursement") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Record money ECI paid back to you for purchases made with your own money.")
+                MoneyField("Amount reimbursed", amount, { amount = it })
+                DateField(date, { date = it })
+                TextFieldSimple("Reference", reference, { reference = it })
+                TextFieldSimple("Notes", notes, { notes = it })
+                Text("Currently owed: ${money(maxOutstandingCents)}", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val cents = parseMoney(amount)
+                val epoch = parseDate(date)
+                when {
+                    cents == null || cents <= 0 || epoch == null -> Toast.makeText(context, "Enter a valid amount and date.", Toast.LENGTH_SHORT).show()
+                    maxOutstandingCents > 0L && cents > maxOutstandingCents -> Toast.makeText(context, "That is more than the amount currently owed to you.", Toast.LENGTH_LONG).show()
+                    else -> onSave(Reimbursement(dateEpochDay = epoch, amountCents = cents, reference = reference.trim(), notes = notes.trim()))
+                }
+            }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
@@ -695,7 +766,7 @@ private fun ArchiveScreen(
             item { InfoCard("Archive is empty", "Archive an advance after its report has been sent.") }
         } else {
             items(archivedAdvances, key = { it.id }) { advance ->
-                val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.totalCents }
+                val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.companyPaidCents }
                 val returned = returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
                 val balance = advance.amountCents - spent - returned
                 Card {
@@ -782,6 +853,8 @@ private fun EditSlipScreen(
     var purpose by remember(original.id, original.imagePath) { mutableStateOf(original.purpose) }
     var project by remember(original.id, original.imagePath) { mutableStateOf(original.project) }
     var paymentRef by remember(original.id, original.imagePath) { mutableStateOf(original.paymentReference) }
+    var paymentType by remember(original.id, original.imagePath) { mutableStateOf(original.paymentType) }
+    var ownMoney by remember(original.id, original.imagePath) { mutableStateOf(if (original.ownMoneyCents > 0) plainMoney(original.ownMoneyCents) else "") }
     var selectedAdvanceId by remember(original.id, original.imagePath) {
         mutableStateOf(original.advanceId ?: if (original.id == 0L) advances.firstOrNull { !it.archived }?.id else null)
     }
@@ -805,19 +878,44 @@ private fun EditSlipScreen(
         TextFieldSimple("Purpose / what was purchased for *", purpose, { purpose = it }, error = purpose.isBlank())
         TextFieldSimple("Project / site", project, { project = it })
         TextFieldSimple("Payment reference", paymentRef, { paymentRef = it })
-        AdvancePicker(advances, selectedAdvanceId, { selectedAdvanceId = it })
+        PaymentTypePicker(paymentType) { selected ->
+            paymentType = selected
+            if (selected == PaymentType.OWN) selectedAdvanceId = null
+        }
+        if (paymentType != PaymentType.OWN) {
+            AdvancePicker(advances, selectedAdvanceId, { selectedAdvanceId = it })
+        }
+        if (paymentType == PaymentType.SPLIT) {
+            MoneyField("My own money portion", ownMoney, { ownMoney = it })
+            val previewTotal = parseMoney(total)
+            val previewOwn = parseMoney(ownMoney)
+            if (previewTotal != null && previewOwn != null && previewOwn in 1 until previewTotal) {
+                Text("Company advance portion: ${money(previewTotal - previewOwn)}", style = MaterialTheme.typography.bodySmall)
+            }
+        } else if (paymentType == PaymentType.OWN) {
+            Text("The full receipt total will be recorded as your own money and will not reduce an advance.", style = MaterialTheme.typography.bodySmall)
+        }
         Text("VAT is read from the slip when printed. If it is not printed, the app may calculate the South African 15% VAT portion when the receipt supports it. The VAT field stays editable; enter 0.00 for a zero-rated/no-VAT purchase.", style = MaterialTheme.typography.bodySmall)
         Button(
             modifier = Modifier.fillMaxWidth(),
             onClick = {
                 val totalCents = parseMoney(total)
                 val epoch = parseDate(date)
+                val ownCents = when (paymentType) {
+                    PaymentType.ADVANCE -> 0L
+                    PaymentType.OWN -> totalCents ?: 0L
+                    PaymentType.SPLIT -> parseMoney(ownMoney) ?: -1L
+                }
                 if (totalCents == null || totalCents <= 0) {
                     Toast.makeText(context, "Total is required for reconciliation.", Toast.LENGTH_SHORT).show()
+                } else if (paymentType == PaymentType.SPLIT && (ownCents <= 0L || ownCents >= totalCents)) {
+                    Toast.makeText(context, "Enter the part of the receipt that you paid yourself.", Toast.LENGTH_LONG).show()
+                } else if (paymentType != PaymentType.OWN && selectedAdvanceId == null) {
+                    Toast.makeText(context, "Select the advance that paid the company portion.", Toast.LENGTH_LONG).show()
                 } else {
                     onSave(
                         original.copy(
-                            advanceId = selectedAdvanceId,
+                            advanceId = if (paymentType == PaymentType.OWN) null else selectedAdvanceId,
                             supplier = supplier.trim(),
                             dateEpochDay = epoch,
                             receiptNumber = receiptNo.trim(),
@@ -826,7 +924,9 @@ private fun EditSlipScreen(
                             totalCents = totalCents,
                             purpose = purpose.trim(),
                             project = project.trim(),
-                            paymentReference = paymentRef.trim()
+                            paymentReference = paymentRef.trim(),
+                            paymentType = paymentType,
+                            ownMoneyCents = ownCents
                         )
                     )
                 }
@@ -851,6 +951,24 @@ private fun EditSlipScreen(
 }
 
 @Composable
+private fun PaymentTypePicker(selected: PaymentType, onSelected: (PaymentType) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val label = when (selected) {
+        PaymentType.ADVANCE -> "Paid with: Company advance"
+        PaymentType.OWN -> "Paid with: My own money"
+        PaymentType.SPLIT -> "Paid with: Split payment"
+    }
+    Box {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) { Text(label) }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("Company advance") }, onClick = { onSelected(PaymentType.ADVANCE); open = false })
+            DropdownMenuItem(text = { Text("My own money") }, onClick = { onSelected(PaymentType.OWN); open = false })
+            DropdownMenuItem(text = { Text("Split payment") }, onClick = { onSelected(PaymentType.SPLIT); open = false })
+        }
+    }
+}
+
+@Composable
 private fun AdvancePicker(advances: List<Advance>, selectedId: Long?, onSelected: (Long?) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val selected = advances.firstOrNull { it.id == selectedId }
@@ -871,12 +989,13 @@ private fun AdvancePicker(advances: List<Advance>, selectedId: Long?, onSelected
 }
 
 @Composable
-private fun ReportsScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
+private fun ReportsScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>, reimbursements: List<Reimbursement>) {
     val context = LocalContext.current
     var selectedAdvanceId by remember { mutableStateOf<Long?>(null) }
     val selectedAdvances = advances.filter { selectedAdvanceId == null || it.id == selectedAdvanceId }
     val selectedSlips = slips.filter { selectedAdvanceId == null || it.advanceId == selectedAdvanceId }
     val selectedReturns = returns.filter { selectedAdvanceId == null || it.advanceId == selectedAdvanceId }
+    val selectedReimbursements = if (selectedAdvanceId == null) reimbursements else emptyList()
     val rec = repository.reconciliation(selectedAdvanceId)
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -897,7 +1016,7 @@ private fun ReportsScreen(repository: SlipRepository, advances: List<Advance>, s
                 onClick = {
                     runCatching {
                         val label = selectedAdvanceId?.let { id -> advances.firstOrNull { it.id == id }?.project?.ifBlank { "Advance #$id" } } ?: "All advances"
-                        val file = PdfExporter.officePack(context, label, selectedAdvances, selectedSlips, selectedReturns)
+                        val file = PdfExporter.officePack(context, label, selectedAdvances, selectedSlips, selectedReturns, selectedReimbursements)
                         shareFile(context, file, "application/pdf", "ECI Office Pack")
                     }.onFailure { Toast.makeText(context, "Could not create Office Pack: ${it.message}", Toast.LENGTH_LONG).show() }
                 }, modifier = Modifier.fillMaxWidth()
@@ -925,7 +1044,7 @@ private fun ReportsScreen(repository: SlipRepository, advances: List<Advance>, s
 }
 
 @Composable
-private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
+private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>, reimbursements: List<Reimbursement>) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("settings", 0) }
     var name by remember { mutableStateOf(prefs.getString("name", "Dave") ?: "Dave") }
@@ -933,6 +1052,14 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
     var officeEmail by remember { mutableStateOf(prefs.getString("office_email", "") ?: "") }
     var dextEmail by remember { mutableStateOf(prefs.getString("dext_email", "") ?: "") }
     var restoreFile by remember { mutableStateOf<File?>(null) }
+    var showClearDialog by remember { mutableStateOf(false) }
+    var clearActive by remember { mutableStateOf(false) }
+    var clearArchived by remember { mutableStateOf(false) }
+    var clearSlips by remember { mutableStateOf(false) }
+    var clearReturns by remember { mutableStateOf(false) }
+    var clearOwnMoney by remember { mutableStateOf(false) }
+    var clearReimbursements by remember { mutableStateOf(false) }
+    var clearSettings by remember { mutableStateOf(false) }
 
     val restorePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) {
@@ -960,14 +1087,20 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         Text("Backups contain your local records and the stored receipt images. Keep the ZIP somewhere safe.")
         OutlinedButton(onClick = {
             runCatching {
-                val file = BackupManager.createBackup(context, advances, slips, returns)
+                val file = BackupManager.createBackup(context, advances, slips, returns, reimbursements)
                 shareFile(context, file, "application/zip", "ECI Slip Manager Backup")
             }.onFailure { Toast.makeText(context, "Backup failed: ${it.message}", Toast.LENGTH_LONG).show() }
         }, modifier = Modifier.fillMaxWidth()) { Text("Create & share backup ZIP") }
         OutlinedButton(onClick = { restorePicker.launch("application/zip") }, modifier = Modifier.fillMaxWidth()) { Text("Restore from backup ZIP") }
 
+        Spacer(Modifier.height(12.dp)); SectionTitle("Data management")
+        Text("Clear test data selectively. Make a backup first if there is anything you may want to restore later.")
+        OutlinedButton(onClick = { showClearDialog = true }, modifier = Modifier.fillMaxWidth()) {
+            Text("Clear / reset selected data")
+        }
+
         Spacer(Modifier.height(12.dp))
-        InfoCard("Storage", "Version 0.1 stores the database and original receipt images privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
+        InfoCard("Storage", "Version 0.6 stores the database and original receipt images privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
     }
 
     restoreFile?.let { file ->
@@ -979,7 +1112,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                 TextButton(onClick = {
                     runCatching {
                         val restored = BackupManager.restore(context, file)
-                        repository.replaceAll(restored.advances, restored.slips, restored.returns)
+                        repository.replaceAll(restored.advances, restored.slips, restored.returns, restored.reimbursements)
                         Toast.makeText(context, "Backup restored", Toast.LENGTH_LONG).show()
                     }.onFailure { Toast.makeText(context, "Restore failed: ${it.message}", Toast.LENGTH_LONG).show() }
                     file.delete(); restoreFile = null
@@ -988,6 +1121,57 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
             dismissButton = { TextButton(onClick = { file.delete(); restoreFile = null }) { Text("Cancel") } }
         )
     }
+
+    if (showClearDialog) {
+        val allSelected = clearActive && clearArchived && clearSlips && clearReturns && clearOwnMoney && clearReimbursements && clearSettings
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = { Text("Clear selected data") },
+            text = {
+                Column(Modifier.height(430.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Choose only the information you want to remove. Deleting advances keeps their slips but makes those slips unallocated; linked money-return records are removed with the advance.")
+                    OutlinedButton(onClick = {
+                        runCatching {
+                            val file = BackupManager.createBackup(context, advances, slips, returns, reimbursements)
+                            shareFile(context, file, "application/zip", "ECI Slip Manager Backup")
+                        }.onFailure { Toast.makeText(context, "Backup failed: ${it.message}", Toast.LENGTH_LONG).show() }
+                    }, modifier = Modifier.fillMaxWidth()) { Text("Create backup first") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = allSelected, onCheckedChange = { value ->
+                            clearActive = value; clearArchived = value; clearSlips = value; clearReturns = value
+                            clearOwnMoney = value; clearReimbursements = value; clearSettings = value
+                        })
+                        Text("Select all")
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearActive, { clearActive = it }); Text("Active advances (${advances.count { !it.archived }})") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearArchived, { clearArchived = it }); Text("Archived advances (${advances.count { it.archived }})") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearSlips, { clearSlips = it }); Text("Slips & receipt photos (${slips.size})") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearReturns, { clearReturns = it }); Text("Money returned records (${returns.size})") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearOwnMoney, { clearOwnMoney = it }); Text("Own-money allocations (${slips.count { it.ownMoneyCents > 0L || it.paymentType != PaymentType.ADVANCE }}) — keeps slips") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearReimbursements, { clearReimbursements = it }); Text("Reimbursement records (${reimbursements.size})") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearSettings, { clearSettings = it }); Text("Name, company and email settings") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val any = clearActive || clearArchived || clearSlips || clearReturns || clearOwnMoney || clearReimbursements || clearSettings
+                    if (!any) {
+                        Toast.makeText(context, "Select at least one item to clear.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        repository.clearSelectedData(clearActive, clearArchived, clearSlips, clearReturns, clearOwnMoney, clearReimbursements)
+                        if (clearSettings) {
+                            prefs.edit().clear().apply()
+                            name = "Dave"; company = "ECI Automation"; officeEmail = ""; dextEmail = ""
+                        }
+                        Toast.makeText(context, "Selected data cleared", Toast.LENGTH_LONG).show()
+                        showClearDialog = false
+                    }
+                }) { Text("Clear selected", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showClearDialog = false }) { Text("Cancel") } }
+        )
+    }
+
 }
 
 @Composable
