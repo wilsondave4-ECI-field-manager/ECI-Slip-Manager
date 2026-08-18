@@ -44,6 +44,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 image_path TEXT NOT NULL,
                 ocr_text TEXT NOT NULL DEFAULT '',
                 created_at_millis INTEGER NOT NULL,
+                payment_type TEXT NOT NULL DEFAULT 'ADVANCE',
+                own_money_cents INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(advance_id) REFERENCES advances(id) ON DELETE SET NULL
             )
             """.trimIndent()
@@ -60,14 +62,34 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             )
             """.trimIndent()
         )
+        createReimbursementsTable(db)
         db.execSQL("CREATE INDEX idx_slips_advance ON slips(advance_id)")
         db.execSQL("CREATE INDEX idx_slips_supplier ON slips(supplier)")
+    }
+
+    private fun createReimbursementsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS reimbursements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_epoch_day INTEGER NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                reference TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent()
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE advances ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             db.execSQL("ALTER TABLE advances ADD COLUMN archived_at_millis INTEGER NULL")
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE slips ADD COLUMN payment_type TEXT NOT NULL DEFAULT 'ADVANCE'")
+            db.execSQL("ALTER TABLE slips ADD COLUMN own_money_cents INTEGER NOT NULL DEFAULT 0")
+            createReimbursementsTable(db)
         }
     }
 
@@ -102,6 +124,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 val dateCol = c.getColumnIndexOrThrow("date_epoch_day")
                 val subtotalCol = c.getColumnIndexOrThrow("subtotal_cents")
                 val vatCol = c.getColumnIndexOrThrow("vat_cents")
+                val paymentType = runCatching {
+                    PaymentType.valueOf(c.getString(c.getColumnIndexOrThrow("payment_type")))
+                }.getOrDefault(PaymentType.ADVANCE)
                 add(
                     Slip(
                         id = c.getLong(c.getColumnIndexOrThrow("id")),
@@ -117,7 +142,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         paymentReference = c.getString(c.getColumnIndexOrThrow("payment_reference")),
                         imagePath = c.getString(c.getColumnIndexOrThrow("image_path")),
                         ocrText = c.getString(c.getColumnIndexOrThrow("ocr_text")),
-                        createdAtMillis = c.getLong(c.getColumnIndexOrThrow("created_at_millis"))
+                        createdAtMillis = c.getLong(c.getColumnIndexOrThrow("created_at_millis")),
+                        paymentType = paymentType,
+                        ownMoneyCents = c.getLong(c.getColumnIndexOrThrow("own_money_cents"))
                     )
                 )
             }
@@ -135,6 +162,24 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         advanceId = c.getLong(c.getColumnIndexOrThrow("advance_id")),
                         dateEpochDay = c.getLong(c.getColumnIndexOrThrow("date_epoch_day")),
                         amountCents = c.getLong(c.getColumnIndexOrThrow("amount_cents")),
+                        notes = c.getString(c.getColumnIndexOrThrow("notes"))
+                    )
+                )
+            }
+        }
+    }
+
+    fun getReimbursements(): List<Reimbursement> = readableDatabase.query(
+        "reimbursements", null, null, null, null, null, "date_epoch_day DESC, id DESC"
+    ).use { c ->
+        buildList {
+            while (c.moveToNext()) {
+                add(
+                    Reimbursement(
+                        id = c.getLong(c.getColumnIndexOrThrow("id")),
+                        dateEpochDay = c.getLong(c.getColumnIndexOrThrow("date_epoch_day")),
+                        amountCents = c.getLong(c.getColumnIndexOrThrow("amount_cents")),
+                        reference = c.getString(c.getColumnIndexOrThrow("reference")),
                         notes = c.getString(c.getColumnIndexOrThrow("notes"))
                     )
                 )
@@ -175,6 +220,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("image_path", item.imagePath)
             put("ocr_text", item.ocrText)
             put("created_at_millis", item.createdAtMillis)
+            put("payment_type", item.paymentType.name)
+            put("own_money_cents", item.ownMoneyCents)
         }
         return if (item.id == 0L) {
             writableDatabase.insertOrThrow("slips", null, values)
@@ -199,18 +246,48 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
     }
 
-    fun deleteSlip(id: Long) {
-        writableDatabase.delete("slips", "id=?", arrayOf(id.toString()))
+    fun upsertReimbursement(item: Reimbursement): Long {
+        val values = ContentValues().apply {
+            put("date_epoch_day", item.dateEpochDay)
+            put("amount_cents", item.amountCents)
+            put("reference", item.reference)
+            put("notes", item.notes)
+        }
+        return if (item.id == 0L) {
+            writableDatabase.insertOrThrow("reimbursements", null, values)
+        } else {
+            writableDatabase.update("reimbursements", values, "id=?", arrayOf(item.id.toString()))
+            item.id
+        }
     }
 
-    fun deleteAdvance(id: Long) {
-        writableDatabase.delete("advances", "id=?", arrayOf(id.toString()))
+    fun deleteSlip(id: Long) { writableDatabase.delete("slips", "id=?", arrayOf(id.toString())) }
+    fun deleteAdvance(id: Long) { writableDatabase.delete("advances", "id=?", arrayOf(id.toString())) }
+    fun deleteReimbursement(id: Long) { writableDatabase.delete("reimbursements", "id=?", arrayOf(id.toString())) }
+
+    fun clearActiveAdvances() { writableDatabase.delete("advances", "archived=0", null) }
+    fun clearArchivedAdvances() { writableDatabase.delete("advances", "archived=1", null) }
+    fun clearReturns() { writableDatabase.delete("money_returns", null, null) }
+    fun clearReimbursements() { writableDatabase.delete("reimbursements", null, null) }
+    fun clearSlips() { writableDatabase.delete("slips", null, null) }
+    fun clearOwnMoneyAllocations() {
+        val values = ContentValues().apply {
+            put("payment_type", PaymentType.ADVANCE.name)
+            put("own_money_cents", 0L)
+        }
+        writableDatabase.update("slips", values, "own_money_cents>0 OR payment_type!='ADVANCE'", null)
     }
 
-    fun replaceAll(advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
+    fun replaceAll(
+        advances: List<Advance>,
+        slips: List<Slip>,
+        returns: List<MoneyReturn>,
+        reimbursements: List<Reimbursement>
+    ) {
         val db = writableDatabase
         db.beginTransaction()
         try {
+            db.delete("reimbursements", null, null)
             db.delete("money_returns", null, null)
             db.delete("slips", null, null)
             db.delete("advances", null, null)
@@ -244,6 +321,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     put("image_path", item.imagePath)
                     put("ocr_text", item.ocrText)
                     put("created_at_millis", item.createdAtMillis)
+                    put("payment_type", item.paymentType.name)
+                    put("own_money_cents", item.ownMoneyCents)
                 }
                 db.insertOrThrow("slips", null, v)
             }
@@ -257,6 +336,16 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 }
                 db.insertOrThrow("money_returns", null, v)
             }
+            reimbursements.sortedBy { it.id }.forEach { item ->
+                val v = ContentValues().apply {
+                    put("id", item.id)
+                    put("date_epoch_day", item.dateEpochDay)
+                    put("amount_cents", item.amountCents)
+                    put("reference", item.reference)
+                    put("notes", item.notes)
+                }
+                db.insertOrThrow("reimbursements", null, v)
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -265,6 +354,6 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
     }
 }
