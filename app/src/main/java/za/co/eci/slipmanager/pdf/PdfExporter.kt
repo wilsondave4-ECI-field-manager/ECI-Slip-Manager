@@ -1,0 +1,151 @@
+package za.co.eci.slipmanager.pdf
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.pdf.PdfDocument
+import za.co.eci.slipmanager.data.Advance
+import za.co.eci.slipmanager.data.MoneyReturn
+import za.co.eci.slipmanager.data.Slip
+import java.io.File
+import java.io.FileOutputStream
+import java.text.NumberFormat
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+object PdfExporter {
+    private const val PAGE_W = 595
+    private const val PAGE_H = 842
+    private val za = Locale("en", "ZA")
+    private val money = NumberFormat.getCurrencyInstance(za)
+    private val dateFmt = DateTimeFormatter.ofPattern("dd MMM yyyy", za)
+
+    fun officePack(
+        context: Context,
+        title: String,
+        advances: List<Advance>,
+        slips: List<Slip>,
+        returns: List<MoneyReturn>
+    ): File {
+        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val file = File(dir, "ECI_Office_Pack_${System.currentTimeMillis()}.pdf")
+        val doc = PdfDocument()
+
+        var pageNo = 1
+        var page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, pageNo++).create())
+        var y = 48f
+        val canvas = page.canvas
+        val heading = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 22f; isFakeBoldText = true }
+        val sub = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 12f; isFakeBoldText = true }
+        val body = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 10f }
+        val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = 1f }
+
+        canvas.drawText("ECI Slip Manager", 36f, y, heading); y += 28f
+        canvas.drawText(title, 36f, y, sub); y += 26f
+
+        val received = advances.sumOf { it.amountCents }
+        val slipTotal = slips.sumOf { it.totalCents }
+        val returned = returns.sumOf { it.amountCents }
+        val outstanding = received - slipTotal - returned
+
+        listOf(
+            "Money received: ${fmt(received)}",
+            "Receipts captured: ${fmt(slipTotal)}",
+            "Money returned: ${fmt(returned)}",
+            "Outstanding balance: ${fmt(outstanding)}",
+            "Number of slips: ${slips.size}"
+        ).forEach { canvas.drawText(it, 36f, y, body); y += 18f }
+
+        y += 10f
+        canvas.drawLine(36f, y, PAGE_W - 36f, y, line); y += 22f
+        canvas.drawText("Slip register", 36f, y, sub); y += 20f
+
+        slips.sortedByDescending { it.dateEpochDay ?: Long.MIN_VALUE }.forEachIndexed { index, slip ->
+            if (y > 790f) {
+                doc.finishPage(page)
+                page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, pageNo++).create())
+                y = 45f
+            }
+            val date = slip.dateEpochDay?.let { LocalDate.ofEpochDay(it).format(dateFmt) } ?: "Date missing"
+            val supplier = slip.supplier.ifBlank { "Supplier missing" }
+            val purpose = slip.purpose.ifBlank { "Purpose missing" }
+            canvasOf(page).drawText("${index + 1}. $date  |  $supplier  |  ${fmt(slip.totalCents)}", 36f, y, body)
+            y += 14f
+            canvasOf(page).drawText("    $purpose", 36f, y, body)
+            y += 18f
+        }
+        doc.finishPage(page)
+
+        slips.forEach { slip ->
+            val bitmap = BitmapFactory.decodeFile(slip.imagePath) ?: return@forEach
+            val receiptPage = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, pageNo++).create())
+            drawReceiptPage(receiptPage.canvas, bitmap, slip)
+            doc.finishPage(receiptPage)
+            bitmap.recycle()
+        }
+
+        FileOutputStream(file).use { doc.writeTo(it) }
+        doc.close()
+        return file
+    }
+
+    fun combinedDext(context: Context, slips: List<Slip>): File {
+        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val file = File(dir, "ECI_Dext_Combined_${System.currentTimeMillis()}.pdf")
+        val doc = PdfDocument()
+        slips.forEachIndexed { i, slip ->
+            val bitmap = BitmapFactory.decodeFile(slip.imagePath) ?: return@forEachIndexed
+            val page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, i + 1).create())
+            drawImageOnly(page.canvas, bitmap)
+            doc.finishPage(page)
+            bitmap.recycle()
+        }
+        FileOutputStream(file).use { doc.writeTo(it) }
+        doc.close()
+        return file
+    }
+
+    fun individualDext(context: Context, slips: List<Slip>): List<File> {
+        val dir = File(context.cacheDir, "exports/dext_${System.currentTimeMillis()}").apply { mkdirs() }
+        return slips.mapIndexedNotNull { index, slip ->
+            val bitmap = BitmapFactory.decodeFile(slip.imagePath) ?: return@mapIndexedNotNull null
+            val safeSupplier = slip.supplier.ifBlank { "Unknown" }.replace(Regex("[^A-Za-z0-9_-]"), "_").take(35)
+            val date = slip.dateEpochDay?.let { LocalDate.ofEpochDay(it).toString() } ?: "NoDate"
+            val file = File(dir, "${date}_${safeSupplier}_${centsFile(slip.totalCents)}_${index + 1}.pdf")
+            val doc = PdfDocument()
+            val page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, 1).create())
+            drawImageOnly(page.canvas, bitmap)
+            doc.finishPage(page)
+            FileOutputStream(file).use { doc.writeTo(it) }
+            doc.close()
+            bitmap.recycle()
+            file
+        }
+    }
+
+    private fun drawReceiptPage(canvas: Canvas, bitmap: Bitmap, slip: Slip) {
+        val head = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 13f; isFakeBoldText = true }
+        val body = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 9f }
+        canvas.drawText(slip.supplier.ifBlank { "Receipt" }, 30f, 30f, head)
+        canvas.drawText("Total ${fmt(slip.totalCents)}", 30f, 46f, body)
+        drawImageOnly(canvas, bitmap, top = 62f)
+    }
+
+    private fun drawImageOnly(canvas: Canvas, bitmap: Bitmap, top: Float = 24f) {
+        val maxW = PAGE_W - 48f
+        val maxH = PAGE_H - top - 24f
+        val scale = minOf(maxW / bitmap.width.toFloat(), maxH / bitmap.height.toFloat())
+        val w = bitmap.width * scale
+        val h = bitmap.height * scale
+        val left = (PAGE_W - w) / 2f
+        canvas.drawBitmap(bitmap, null, RectF(left, top, left + w, top + h), Paint(Paint.ANTI_ALIAS_FLAG))
+    }
+
+    private fun canvasOf(page: PdfDocument.Page): Canvas = page.canvas
+    private fun fmt(cents: Long): String = money.format(cents / 100.0)
+    private fun centsFile(cents: Long): String = String.format(Locale.US, "%.2f", cents / 100.0).replace('.', '_')
+}
