@@ -6,7 +6,9 @@ data class Advance(
     val amountCents: Long,
     val reference: String = "",
     val project: String = "",
-    val notes: String = ""
+    val notes: String = "",
+    val archived: Boolean = false,
+    val archivedAtMillis: Long? = null
 )
 
 data class Slip(
