@@ -21,7 +21,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 amount_cents INTEGER NOT NULL,
                 reference TEXT NOT NULL DEFAULT '',
                 project TEXT NOT NULL DEFAULT '',
-                notes TEXT NOT NULL DEFAULT ''
+                notes TEXT NOT NULL DEFAULT '',
+                archived INTEGER NOT NULL DEFAULT 0,
+                archived_at_millis INTEGER NULL
             )
             """.trimIndent()
         )
@@ -62,13 +64,19 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         db.execSQL("CREATE INDEX idx_slips_supplier ON slips(supplier)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE advances ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE advances ADD COLUMN archived_at_millis INTEGER NULL")
+        }
+    }
 
     fun getAdvances(): List<Advance> = readableDatabase.query(
         "advances", null, null, null, null, null, "date_epoch_day DESC, id DESC"
     ).use { c ->
         buildList {
             while (c.moveToNext()) {
+                val archivedAtCol = c.getColumnIndexOrThrow("archived_at_millis")
                 add(
                     Advance(
                         id = c.getLong(c.getColumnIndexOrThrow("id")),
@@ -76,7 +84,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         amountCents = c.getLong(c.getColumnIndexOrThrow("amount_cents")),
                         reference = c.getString(c.getColumnIndexOrThrow("reference")),
                         project = c.getString(c.getColumnIndexOrThrow("project")),
-                        notes = c.getString(c.getColumnIndexOrThrow("notes"))
+                        notes = c.getString(c.getColumnIndexOrThrow("notes")),
+                        archived = c.getInt(c.getColumnIndexOrThrow("archived")) != 0,
+                        archivedAtMillis = if (c.isNull(archivedAtCol)) null else c.getLong(archivedAtCol)
                     )
                 )
             }
@@ -139,6 +149,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("reference", item.reference)
             put("project", item.project)
             put("notes", item.notes)
+            put("archived", if (item.archived) 1 else 0)
+            if (item.archivedAtMillis == null) putNull("archived_at_millis") else put("archived_at_millis", item.archivedAtMillis)
         }
         return if (item.id == 0L) {
             writableDatabase.insertOrThrow("advances", null, values)
@@ -211,6 +223,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     put("reference", item.reference)
                     put("project", item.project)
                     put("notes", item.notes)
+                    put("archived", if (item.archived) 1 else 0)
+                    if (item.archivedAtMillis == null) putNull("archived_at_millis") else put("archived_at_millis", item.archivedAtMillis)
                 }
                 db.insertOrThrow("advances", null, v)
             }
@@ -251,6 +265,6 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
     }
 }
