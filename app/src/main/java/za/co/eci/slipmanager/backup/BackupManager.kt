@@ -5,6 +5,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.MoneyReturn
+import za.co.eci.slipmanager.data.PaymentType
+import za.co.eci.slipmanager.data.Reimbursement
 import za.co.eci.slipmanager.data.Slip
 import java.io.File
 import java.io.FileOutputStream
@@ -17,15 +19,17 @@ object BackupManager {
         context: Context,
         advances: List<Advance>,
         slips: List<Slip>,
-        returns: List<MoneyReturn>
+        returns: List<MoneyReturn>,
+        reimbursements: List<Reimbursement> = emptyList()
     ): File {
         val outDir = File(context.cacheDir, "backup").apply { mkdirs() }
         val file = File(outDir, "ECI_Slip_Manager_Backup_${System.currentTimeMillis()}.zip")
         val json = JSONObject().apply {
-            put("version", 2)
+            put("version", 3)
             put("advances", JSONArray().apply { advances.forEach { put(advanceJson(it)) } })
             put("slips", JSONArray().apply { slips.forEach { put(slipJson(it)) } })
             put("returns", JSONArray().apply { returns.forEach { put(returnJson(it)) } })
+            put("reimbursements", JSONArray().apply { reimbursements.forEach { put(reimbursementJson(it)) } })
         }
         ZipOutputStream(FileOutputStream(file)).use { zip ->
             zip.putNextEntry(ZipEntry("data.json"))
@@ -43,7 +47,12 @@ object BackupManager {
         return file
     }
 
-    data class Restored(val advances: List<Advance>, val slips: List<Slip>, val returns: List<MoneyReturn>)
+    data class Restored(
+        val advances: List<Advance>,
+        val slips: List<Slip>,
+        val returns: List<MoneyReturn>,
+        val reimbursements: List<Reimbursement>
+    )
 
     fun restore(context: Context, zipFile: File): Restored {
         val receiptsDir = File(context.filesDir, "receipts").apply { mkdirs() }
@@ -53,6 +62,9 @@ object BackupManager {
             val advances = root.getJSONArray("advances").mapObjects(::advanceFromJson)
             val originalSlips = root.getJSONArray("slips").mapObjects(::slipFromJson)
             val returns = root.getJSONArray("returns").mapObjects(::returnFromJson)
+            val reimbursements = if (root.has("reimbursements")) {
+                root.getJSONArray("reimbursements").mapObjects(::reimbursementFromJson)
+            } else emptyList()
 
             val slips = originalSlips.map { slip ->
                 val oldName = File(slip.imagePath).name
@@ -63,7 +75,7 @@ object BackupManager {
                     slip.copy(imagePath = target.absolutePath)
                 } else slip
             }
-            return Restored(advances, slips, returns)
+            return Restored(advances, slips, returns, reimbursements)
         }
     }
 
@@ -73,6 +85,7 @@ object BackupManager {
         put("archived", a.archived)
         if (a.archivedAtMillis == null) put("archivedAt", JSONObject.NULL) else put("archivedAt", a.archivedAtMillis)
     }
+
     private fun slipJson(s: Slip) = JSONObject().apply {
         put("id", s.id); if (s.advanceId == null) put("advanceId", JSONObject.NULL) else put("advanceId", s.advanceId)
         put("supplier", s.supplier); if (s.dateEpochDay == null) put("date", JSONObject.NULL) else put("date", s.dateEpochDay)
@@ -82,9 +95,16 @@ object BackupManager {
         put("total", s.totalCents); put("purpose", s.purpose); put("project", s.project)
         put("paymentReference", s.paymentReference); put("imagePath", s.imagePath); put("ocrText", s.ocrText)
         put("createdAt", s.createdAtMillis)
+        put("paymentType", s.paymentType.name)
+        put("ownMoney", s.ownMoneyCents)
     }
+
     private fun returnJson(r: MoneyReturn) = JSONObject().apply {
         put("id", r.id); put("advanceId", r.advanceId); put("date", r.dateEpochDay); put("amount", r.amountCents); put("notes", r.notes)
+    }
+
+    private fun reimbursementJson(r: Reimbursement) = JSONObject().apply {
+        put("id", r.id); put("date", r.dateEpochDay); put("amount", r.amountCents); put("reference", r.reference); put("notes", r.notes)
     }
 
     private fun advanceFromJson(o: JSONObject) = Advance(
@@ -97,6 +117,7 @@ object BackupManager {
         archived = o.optBoolean("archived", false),
         archivedAtMillis = if (!o.has("archivedAt") || o.isNull("archivedAt")) null else o.getLong("archivedAt")
     )
+
     private fun slipFromJson(o: JSONObject) = Slip(
         id = o.getLong("id"),
         advanceId = if (o.isNull("advanceId")) null else o.getLong("advanceId"),
@@ -111,9 +132,22 @@ object BackupManager {
         paymentReference = o.optString("paymentReference"),
         imagePath = o.optString("imagePath"),
         ocrText = o.optString("ocrText"),
-        createdAtMillis = o.optLong("createdAt")
+        createdAtMillis = o.optLong("createdAt"),
+        paymentType = runCatching { PaymentType.valueOf(o.optString("paymentType", "ADVANCE")) }.getOrDefault(PaymentType.ADVANCE),
+        ownMoneyCents = o.optLong("ownMoney", 0L)
     )
-    private fun returnFromJson(o: JSONObject) = MoneyReturn(o.getLong("id"), o.getLong("advanceId"), o.getLong("date"), o.getLong("amount"), o.optString("notes"))
+
+    private fun returnFromJson(o: JSONObject) = MoneyReturn(
+        o.getLong("id"), o.getLong("advanceId"), o.getLong("date"), o.getLong("amount"), o.optString("notes")
+    )
+
+    private fun reimbursementFromJson(o: JSONObject) = Reimbursement(
+        id = o.getLong("id"),
+        dateEpochDay = o.getLong("date"),
+        amountCents = o.getLong("amount"),
+        reference = o.optString("reference"),
+        notes = o.optString("notes")
+    )
 
     private fun <T> JSONArray.mapObjects(mapper: (JSONObject) -> T): List<T> = buildList {
         for (i in 0 until length()) add(mapper(getJSONObject(i)))
