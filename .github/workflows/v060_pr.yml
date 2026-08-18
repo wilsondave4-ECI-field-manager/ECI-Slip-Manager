@@ -33,7 +33,9 @@ jobs:
         run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
 
       - name: Apply v0.6 UI changes
-        run: python .github/scripts/apply_v060.py
+        run: |
+          python .github/scripts/apply_v060.py
+          python .github/scripts/fix_v060_home.py
 
       - name: Build Android APK
         run: gradle :app:assembleDebug --stacktrace
