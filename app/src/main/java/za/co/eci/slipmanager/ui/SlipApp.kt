@@ -1,0 +1,802 @@
+package za.co.eci.slipmanager.ui
+
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.ReceiptLong
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import za.co.eci.slipmanager.backup.BackupManager
+import za.co.eci.slipmanager.data.Advance
+import za.co.eci.slipmanager.data.MoneyReturn
+import za.co.eci.slipmanager.data.Slip
+import za.co.eci.slipmanager.data.SlipRepository
+import za.co.eci.slipmanager.ocr.ReceiptGuess
+import za.co.eci.slipmanager.ocr.ReceiptOcr
+import za.co.eci.slipmanager.pdf.PdfExporter
+import java.io.File
+import java.text.NumberFormat
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
+import java.util.Locale
+
+private enum class Screen { HOME, ADVANCES, SLIPS, REPORTS, SETTINGS, EDIT_SLIP }
+
+@Composable
+fun SlipApp(repository: SlipRepository) {
+    val context = LocalContext.current
+    val activity = context as Activity
+    val advances by repository.advances.collectAsState()
+    val slips by repository.slips.collectAsState()
+    val returns by repository.returns.collectAsState()
+
+    var screen by remember { mutableStateOf(Screen.HOME) }
+    var editingSlip by remember { mutableStateOf<Slip?>(null) }
+    var pendingImageFile by remember { mutableStateOf<File?>(null) }
+    var processingOcr by remember { mutableStateOf(false) }
+    var lastBackMillis by remember { mutableLongStateOf(0L) }
+
+    fun makeReceiptFile(): File {
+        val dir = File(context.filesDir, "receipts").apply { mkdirs() }
+        return File(dir, "receipt_${System.currentTimeMillis()}.jpg")
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val file = pendingImageFile
+        if (!success || file == null) {
+            if (file != null) file.delete()
+            pendingImageFile = null
+            return@rememberLauncherForActivityResult
+        }
+        processingOcr = true
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        ReceiptOcr.recognize(context, uri) { result ->
+            processingOcr = false
+            val guess = result.getOrElse {
+                Toast.makeText(context, "OCR could not read the slip. Enter the details manually.", Toast.LENGTH_LONG).show()
+                ReceiptGuess()
+            }
+            editingSlip = Slip(
+                supplier = guess.supplier,
+                dateEpochDay = guess.dateEpochDay,
+                receiptNumber = guess.receiptNumber,
+                subtotalCents = guess.subtotalCents,
+                vatCents = guess.vatCents,
+                totalCents = guess.totalCents ?: 0L,
+                imagePath = file.absolutePath,
+                ocrText = guess.rawText
+            )
+            pendingImageFile = null
+            screen = Screen.EDIT_SLIP
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            val file = makeReceiptFile()
+            pendingImageFile = file
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+            cameraLauncher.launch(uri)
+        } else {
+            Toast.makeText(context, "Camera permission is needed to scan slips.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun startScan() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            val file = makeReceiptFile()
+            pendingImageFile = file
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+            cameraLauncher.launch(uri)
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    BackHandler {
+        if (screen != Screen.HOME) {
+            editingSlip = null
+            screen = Screen.HOME
+        } else {
+            val now = System.currentTimeMillis()
+            if (now - lastBackMillis < 1800) {
+                activity.finish()
+            } else {
+                lastBackMillis = now
+                Toast.makeText(context, "Press back again to exit", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            AppTopBar(
+                title = when (screen) {
+                    Screen.HOME -> "ECI Slip Manager"
+                    Screen.ADVANCES -> "Money Received"
+                    Screen.SLIPS -> "Slips"
+                    Screen.REPORTS -> "Reports & Export"
+                    Screen.SETTINGS -> "Settings"
+                    Screen.EDIT_SLIP -> if ((editingSlip?.id ?: 0L) == 0L) "Review Slip" else "Edit Slip"
+                },
+                showSettings = screen == Screen.HOME,
+                onSettings = { screen = Screen.SETTINGS }
+            )
+        },
+        bottomBar = {
+            if (screen in setOf(Screen.HOME, Screen.SLIPS, Screen.REPORTS)) {
+                BottomNav(screen, onNavigate = { screen = it }, onScan = ::startScan)
+            }
+        },
+        floatingActionButton = {
+            if (screen == Screen.HOME) {
+                FloatingActionButton(onClick = ::startScan) {
+                    Icon(Icons.Default.CameraAlt, contentDescription = "Scan slip")
+                }
+            }
+        }
+    ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            when (screen) {
+                Screen.HOME -> HomeScreen(
+                    repository = repository,
+                    advances = advances,
+                    slips = slips,
+                    onAdvances = { screen = Screen.ADVANCES },
+                    onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
+                    onScan = ::startScan
+                )
+                Screen.ADVANCES -> AdvancesScreen(repository, advances, slips, returns)
+                Screen.SLIPS -> SlipsScreen(
+                    slips = slips,
+                    onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
+                )
+                Screen.REPORTS -> ReportsScreen(repository, advances, slips, returns)
+                Screen.SETTINGS -> SettingsScreen(repository, advances, slips, returns)
+                Screen.EDIT_SLIP -> editingSlip?.let { original ->
+                    EditSlipScreen(
+                        original = original,
+                        advances = advances,
+                        onSave = {
+                            repository.saveSlip(it)
+                            editingSlip = null
+                            screen = Screen.SLIPS
+                        },
+                        onDelete = if (original.id > 0) {
+                            {
+                                repository.deleteSlip(original)
+                                editingSlip = null
+                                screen = Screen.SLIPS
+                            }
+                        } else null,
+                        onCancel = {
+                            if (original.id == 0L) File(original.imagePath).delete()
+                            editingSlip = null
+                            screen = Screen.HOME
+                        }
+                    )
+                }
+            }
+            if (processingOcr) {
+                Box(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(alpha = 0.88f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator()
+                        Spacer(Modifier.height(16.dp))
+                        Text("Reading slip…")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppTopBar(title: String, showSettings: Boolean, onSettings: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            if (title == "ECI Slip Manager") Text("Local • Private • Offline", style = MaterialTheme.typography.labelSmall)
+        }
+        if (showSettings) IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Settings") }
+    }
+}
+
+@Composable
+private fun BottomNav(screen: Screen, onNavigate: (Screen) -> Unit, onScan: () -> Unit) {
+    NavigationBar {
+        NavigationBarItem(
+            selected = screen == Screen.HOME,
+            onClick = { onNavigate(Screen.HOME) },
+            icon = { Icon(Icons.Default.Home, null) }, label = { Text("Home") }
+        )
+        NavigationBarItem(
+            selected = false,
+            onClick = onScan,
+            icon = { Icon(Icons.Default.CameraAlt, null) }, label = { Text("Scan") }
+        )
+        NavigationBarItem(
+            selected = screen == Screen.SLIPS,
+            onClick = { onNavigate(Screen.SLIPS) },
+            icon = { Icon(Icons.Default.ReceiptLong, null) }, label = { Text("Slips") }
+        )
+        NavigationBarItem(
+            selected = screen == Screen.REPORTS,
+            onClick = { onNavigate(Screen.REPORTS) },
+            icon = { Icon(Icons.Default.Description, null) }, label = { Text("Reports") }
+        )
+    }
+}
+
+@Composable
+private fun HomeScreen(
+    repository: SlipRepository,
+    advances: List<Advance>,
+    slips: List<Slip>,
+    onAdvances: () -> Unit,
+    onSlip: (Slip) -> Unit,
+    onScan: () -> Unit
+) {
+    val rec = repository.reconciliation()
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)) {
+                Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                    Text("AVAILABLE BALANCE", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelLarge)
+                    Text(money(rec.outstandingCents), color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MiniTotal("Received", rec.receivedCents, Modifier.weight(1f))
+                MiniTotal("Slips", rec.slipsCents, Modifier.weight(1f))
+            }
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MiniTotal("Returned", rec.returnedCents, Modifier.weight(1f))
+                MiniTotal("Slips", slips.size.toLong(), Modifier.weight(1f), asCount = true)
+            }
+        }
+        item {
+            Button(onClick = onScan, modifier = Modifier.fillMaxWidth().height(56.dp)) {
+                Icon(Icons.Default.CameraAlt, null)
+                Spacer(Modifier.width(10.dp))
+                Text("SCAN SLIP", fontWeight = FontWeight.Bold)
+            }
+        }
+        item {
+            OutlinedButton(onClick = onAdvances, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("Money Received / Advances")
+            }
+        }
+        if (advances.isEmpty()) item { InfoCard("Start here", "Add the money paid into your account, then scan slips against it.") }
+        val incomplete = slips.filterNot { it.isComplete }.take(5)
+        if (incomplete.isNotEmpty()) {
+            item { SectionTitle("Needs attention") }
+            items(incomplete, key = { it.id }) { slip -> SlipCard(slip, onSlip) }
+        }
+        if (slips.isNotEmpty()) {
+            item { SectionTitle("Recent slips") }
+            items(slips.take(5), key = { it.id }) { slip -> SlipCard(slip, onSlip) }
+        }
+    }
+}
+
+@Composable
+private fun MiniTotal(label: String, centsOrCount: Long, modifier: Modifier = Modifier, asCount: Boolean = false) {
+    Card(modifier) {
+        Column(Modifier.padding(14.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium)
+            Text(if (asCount) centsOrCount.toString() else money(centsOrCount), fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun InfoCard(title: String, body: String) {
+    Card { Column(Modifier.padding(14.dp)) { Text(title, fontWeight = FontWeight.Bold); Text(body) } }
+}
+
+@Composable
+private fun SectionTitle(text: String) = Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+@Composable
+private fun AdvancesScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
+    var amount by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf(LocalDate.now().toString()) }
+    var reference by remember { mutableStateOf("") }
+    var project by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
+    var returnAdvance by remember { mutableStateOf<Advance?>(null) }
+    val context = LocalContext.current
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item { SectionTitle("Add money received") }
+        item { MoneyField("Amount received", amount, { amount = it }) }
+        item { DateField(date, { date = it }) }
+        item { TextFieldSimple("Bank / payment reference", reference, { reference = it }) }
+        item { TextFieldSimple("Project / site", project, { project = it }) }
+        item { TextFieldSimple("Notes", notes, { notes = it }) }
+        item {
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    val cents = parseMoney(amount)
+                    val epoch = parseDate(date)
+                    if (cents == null || cents <= 0 || epoch == null) {
+                        Toast.makeText(context, "Enter a valid amount and date.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        repository.saveAdvance(Advance(dateEpochDay = epoch, amountCents = cents, reference = reference.trim(), project = project.trim(), notes = notes.trim()))
+                        amount = ""; reference = ""; project = ""; notes = ""; date = LocalDate.now().toString()
+                    }
+                }
+            ) { Text("Save money received") }
+        }
+        if (advances.isNotEmpty()) item { SectionTitle("Advances") }
+        items(advances, key = { it.id }) { advance ->
+            val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.totalCents }
+            val returned = returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
+            Card {
+                Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                    Text(advance.project.ifBlank { "Advance #${advance.id}" }, fontWeight = FontWeight.Bold)
+                    Text("${dateText(advance.dateEpochDay)} • ${advance.reference.ifBlank { "No reference" }}")
+                    Spacer(Modifier.height(6.dp))
+                    Text("Received ${money(advance.amountCents)}")
+                    Text("Slips ${money(spent)} • Returned ${money(returned)}")
+                    Text("Balance ${money(advance.amountCents - spent - returned)}", fontWeight = FontWeight.Bold)
+                    TextButton(onClick = { returnAdvance = advance }) { Text("Record money returned") }
+                }
+            }
+        }
+    }
+
+    returnAdvance?.let { advance ->
+        ReturnMoneyDialog(advance, onDismiss = { returnAdvance = null }) { item ->
+            repository.saveReturn(item)
+            returnAdvance = null
+        }
+    }
+}
+
+@Composable
+private fun ReturnMoneyDialog(advance: Advance, onDismiss: () -> Unit, onSave: (MoneyReturn) -> Unit) {
+    var amount by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf(LocalDate.now().toString()) }
+    var notes by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Money returned") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                MoneyField("Amount returned", amount, { amount = it })
+                DateField(date, { date = it })
+                TextFieldSimple("Notes", notes, { notes = it })
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val cents = parseMoney(amount); val epoch = parseDate(date)
+                if (cents == null || cents <= 0 || epoch == null) Toast.makeText(context, "Enter a valid amount and date.", Toast.LENGTH_SHORT).show()
+                else onSave(MoneyReturn(advanceId = advance.id, dateEpochDay = epoch, amountCents = cents, notes = notes.trim()))
+            }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+@Composable
+private fun SlipsScreen(slips: List<Slip>, onOpen: (Slip) -> Unit) {
+    var search by remember { mutableStateOf("") }
+    val filtered = slips.filter {
+        search.isBlank() || listOf(it.supplier, it.purpose, it.project, it.receiptNumber).any { field -> field.contains(search, ignoreCase = true) }
+    }
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        OutlinedTextField(
+            value = search, onValueChange = { search = it }, modifier = Modifier.fillMaxWidth(),
+            label = { Text("Search slips") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true
+        )
+        Spacer(Modifier.height(12.dp))
+        if (filtered.isEmpty()) {
+            InfoCard("No slips", if (search.isBlank()) "Scan your first receipt from the Scan button." else "No slips match your search.")
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(filtered, key = { it.id }) { SlipCard(it, onOpen) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SlipCard(slip: Slip, onOpen: (Slip) -> Unit) {
+    Card(Modifier.fillMaxWidth().clickable { onOpen(slip) }) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(slip.supplier.ifBlank { "Supplier missing" }, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${slip.dateEpochDay?.let(::dateText) ?: "Date missing"} • ${slip.purpose.ifBlank { "Purpose missing" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(if (slip.isComplete) "Complete" else "Missing information", color = if (slip.isComplete) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+            }
+            Text(money(slip.totalCents), fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun EditSlipScreen(
+    original: Slip,
+    advances: List<Advance>,
+    onSave: (Slip) -> Unit,
+    onDelete: (() -> Unit)?,
+    onCancel: () -> Unit
+) {
+    val context = LocalContext.current
+    var supplier by remember(original.id, original.imagePath) { mutableStateOf(original.supplier) }
+    var date by remember(original.id, original.imagePath) { mutableStateOf(original.dateEpochDay?.let { LocalDate.ofEpochDay(it).toString() } ?: "") }
+    var receiptNo by remember(original.id, original.imagePath) { mutableStateOf(original.receiptNumber) }
+    var subtotal by remember(original.id, original.imagePath) { mutableStateOf(original.subtotalCents?.let(::plainMoney) ?: "") }
+    var vat by remember(original.id, original.imagePath) { mutableStateOf(original.vatCents?.let(::plainMoney) ?: "") }
+    var total by remember(original.id, original.imagePath) { mutableStateOf(if (original.totalCents > 0) plainMoney(original.totalCents) else "") }
+    var purpose by remember(original.id, original.imagePath) { mutableStateOf(original.purpose) }
+    var project by remember(original.id, original.imagePath) { mutableStateOf(original.project) }
+    var paymentRef by remember(original.id, original.imagePath) { mutableStateOf(original.paymentReference) }
+    var selectedAdvanceId by remember(original.id, original.imagePath) { mutableStateOf(original.advanceId) }
+    var deleteConfirm by remember { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        val bitmap = remember(original.imagePath) { BitmapFactory.decodeFile(original.imagePath) }
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(), contentDescription = "Receipt scan",
+                modifier = Modifier.fillMaxWidth().height(220.dp), contentScale = ContentScale.Fit
+            )
+        }
+        if (original.ocrText.isBlank()) InfoCard("Manual details", "The receipt could not be read automatically. Enter the missing information below.")
+        TextFieldSimple("Supplier *", supplier, { supplier = it }, error = supplier.isBlank())
+        DateField(date, { date = it }, error = date.isBlank())
+        TextFieldSimple("Receipt / invoice number", receiptNo, { receiptNo = it })
+        MoneyField("Subtotal / excl. VAT", subtotal, { subtotal = it })
+        MoneyField("VAT (confirm from receipt)", vat, { vat = it })
+        MoneyField("Total *", total, { total = it }, error = total.isBlank())
+        TextFieldSimple("Purpose / what was purchased for *", purpose, { purpose = it }, error = purpose.isBlank())
+        TextFieldSimple("Project / site", project, { project = it })
+        TextFieldSimple("Payment reference", paymentRef, { paymentRef = it })
+        AdvancePicker(advances, selectedAdvanceId, { selectedAdvanceId = it })
+        Text("VAT is never assumed automatically. Check it against the receipt before saving.", style = MaterialTheme.typography.bodySmall)
+        Button(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = {
+                val totalCents = parseMoney(total)
+                val epoch = parseDate(date)
+                if (totalCents == null || totalCents <= 0) {
+                    Toast.makeText(context, "Total is required for reconciliation.", Toast.LENGTH_SHORT).show()
+                } else {
+                    onSave(
+                        original.copy(
+                            advanceId = selectedAdvanceId,
+                            supplier = supplier.trim(),
+                            dateEpochDay = epoch,
+                            receiptNumber = receiptNo.trim(),
+                            subtotalCents = parseMoney(subtotal),
+                            vatCents = parseMoney(vat),
+                            totalCents = totalCents,
+                            purpose = purpose.trim(),
+                            project = project.trim(),
+                            paymentReference = paymentRef.trim()
+                        )
+                    )
+                }
+            }
+        ) { Text("Save slip") }
+        OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+        if (onDelete != null) {
+            TextButton(onClick = { deleteConfirm = true }, modifier = Modifier.fillMaxWidth()) { Text("Delete slip", color = MaterialTheme.colorScheme.error) }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+
+    if (deleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { deleteConfirm = false },
+            title = { Text("Delete this slip?") },
+            text = { Text("The stored receipt image and its record will be removed from this phone.") },
+            confirmButton = { TextButton(onClick = { deleteConfirm = false; onDelete?.invoke() }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { deleteConfirm = false }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
+private fun AdvancePicker(advances: List<Advance>, selectedId: Long?, onSelected: (Long?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val selected = advances.firstOrNull { it.id == selectedId }
+    Box {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(selected?.let { it.project.ifBlank { "Advance #${it.id}" } } ?: "Allocate to advance (optional)")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("No advance") }, onClick = { onSelected(null); open = false })
+            advances.forEach { a ->
+                DropdownMenuItem(
+                    text = { Text("${a.project.ifBlank { "Advance #${a.id}" }} • ${money(a.amountCents)}") },
+                    onClick = { onSelected(a.id); open = false }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReportsScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
+    val context = LocalContext.current
+    var selectedAdvanceId by remember { mutableStateOf<Long?>(null) }
+    val selectedAdvances = advances.filter { selectedAdvanceId == null || it.id == selectedAdvanceId }
+    val selectedSlips = slips.filter { selectedAdvanceId == null || it.advanceId == selectedAdvanceId }
+    val selectedReturns = returns.filter { selectedAdvanceId == null || it.advanceId == selectedAdvanceId }
+    val rec = repository.reconciliation(selectedAdvanceId)
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AdvancePicker(advances, selectedAdvanceId, { selectedAdvanceId = it })
+        Card {
+            Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                Text("Reconciliation", fontWeight = FontWeight.Bold)
+                Text("Received ${money(rec.receivedCents)}")
+                Text("Slips ${money(rec.slipsCents)}")
+                Text("Returned ${money(rec.returnedCents)}")
+                Text("Outstanding ${money(rec.outstandingCents)}", fontWeight = FontWeight.Bold)
+            }
+        }
+        if (selectedSlips.isEmpty()) {
+            InfoCard("Nothing to export", "Capture at least one slip before creating PDFs.")
+        } else {
+            Button(
+                onClick = {
+                    runCatching {
+                        val label = selectedAdvanceId?.let { id -> advances.firstOrNull { it.id == id }?.project?.ifBlank { "Advance #$id" } } ?: "All advances"
+                        val file = PdfExporter.officePack(context, label, selectedAdvances, selectedSlips, selectedReturns)
+                        shareFile(context, file, "application/pdf", "ECI Office Pack")
+                    }.onFailure { Toast.makeText(context, "Could not create Office Pack: ${it.message}", Toast.LENGTH_LONG).show() }
+                }, modifier = Modifier.fillMaxWidth()
+            ) { Text("Create & share Office Pack PDF") }
+
+            OutlinedButton(
+                onClick = {
+                    runCatching {
+                        val file = PdfExporter.combinedDext(context, selectedSlips)
+                        shareFile(context, file, "application/pdf", "ECI Dext Pack")
+                    }.onFailure { Toast.makeText(context, "Could not create Dext PDF: ${it.message}", Toast.LENGTH_LONG).show() }
+                }, modifier = Modifier.fillMaxWidth()
+            ) { Text("Dext: combined PDF (1 receipt/page)") }
+
+            OutlinedButton(
+                onClick = {
+                    runCatching {
+                        val files = PdfExporter.individualDext(context, selectedSlips)
+                        shareFiles(context, files, "application/pdf", "ECI Dext Receipts")
+                    }.onFailure { Toast.makeText(context, "Could not create Dext files: ${it.message}", Toast.LENGTH_LONG).show() }
+                }, modifier = Modifier.fillMaxWidth()
+            ) { Text("Dext: individual receipt PDFs") }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("settings", 0) }
+    var name by remember { mutableStateOf(prefs.getString("name", "Dave") ?: "Dave") }
+    var company by remember { mutableStateOf(prefs.getString("company", "ECI Automation") ?: "ECI Automation") }
+    var officeEmail by remember { mutableStateOf(prefs.getString("office_email", "") ?: "") }
+    var dextEmail by remember { mutableStateOf(prefs.getString("dext_email", "") ?: "") }
+    var restoreFile by remember { mutableStateOf<File?>(null) }
+
+    val restorePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                val target = File(context.cacheDir, "restore_${System.currentTimeMillis()}.zip")
+                context.contentResolver.openInputStream(uri)?.use { input -> target.outputStream().use { input.copyTo(it) } }
+                    ?: error("Could not read selected file")
+                restoreFile = target
+            }.onFailure { Toast.makeText(context, "Could not open backup: ${it.message}", Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SectionTitle("Your details")
+        TextFieldSimple("Name", name, { name = it })
+        TextFieldSimple("Company", company, { company = it })
+        TextFieldSimple("Office email", officeEmail, { officeEmail = it })
+        TextFieldSimple("Dext email", dextEmail, { dextEmail = it })
+        Button(onClick = {
+            prefs.edit().putString("name", name).putString("company", company).putString("office_email", officeEmail).putString("dext_email", dextEmail).apply()
+            Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
+        }, modifier = Modifier.fillMaxWidth()) { Text("Save settings") }
+
+        Spacer(Modifier.height(10.dp)); SectionTitle("Backup & restore")
+        Text("Backups contain your local records and the stored receipt images. Keep the ZIP somewhere safe.")
+        OutlinedButton(onClick = {
+            runCatching {
+                val file = BackupManager.createBackup(context, advances, slips, returns)
+                shareFile(context, file, "application/zip", "ECI Slip Manager Backup")
+            }.onFailure { Toast.makeText(context, "Backup failed: ${it.message}", Toast.LENGTH_LONG).show() }
+        }, modifier = Modifier.fillMaxWidth()) { Text("Create & share backup ZIP") }
+        OutlinedButton(onClick = { restorePicker.launch("application/zip") }, modifier = Modifier.fillMaxWidth()) { Text("Restore from backup ZIP") }
+
+        Spacer(Modifier.height(12.dp))
+        InfoCard("Storage", "Version 0.1 stores the database and original receipt images privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
+    }
+
+    restoreFile?.let { file ->
+        AlertDialog(
+            onDismissRequest = { restoreFile = null; file.delete() },
+            title = { Text("Restore backup?") },
+            text = { Text("This will replace the current advances, slips and money-return records on this phone with the selected backup.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching {
+                        val restored = BackupManager.restore(context, file)
+                        repository.replaceAll(restored.advances, restored.slips, restored.returns)
+                        Toast.makeText(context, "Backup restored", Toast.LENGTH_LONG).show()
+                    }.onFailure { Toast.makeText(context, "Restore failed: ${it.message}", Toast.LENGTH_LONG).show() }
+                    file.delete(); restoreFile = null
+                }) { Text("Restore") }
+            },
+            dismissButton = { TextButton(onClick = { file.delete(); restoreFile = null }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
+private fun TextFieldSimple(label: String, value: String, onChange: (String) -> Unit, error: Boolean = false) {
+    OutlinedTextField(
+        value = value, onValueChange = onChange, label = { Text(label) },
+        modifier = Modifier.fillMaxWidth(), singleLine = false, isError = error
+    )
+}
+
+@Composable
+private fun DateField(value: String, onChange: (String) -> Unit, error: Boolean = false) {
+    OutlinedTextField(
+        value = value, onValueChange = onChange, label = { Text("Date (YYYY-MM-DD)") },
+        modifier = Modifier.fillMaxWidth(), singleLine = true, isError = error,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+    )
+}
+
+@Composable
+private fun MoneyField(label: String, value: String, onChange: (String) -> Unit, error: Boolean = false) {
+    OutlinedTextField(
+        value = value, onValueChange = onChange, label = { Text(label) }, prefix = { Text("R ") },
+        modifier = Modifier.fillMaxWidth(), singleLine = true, isError = error,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+    )
+}
+
+private fun shareFile(context: android.content.Context, file: File, mime: String, subject: String) {
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, subject)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, subject))
+}
+
+private fun shareFiles(context: android.content.Context, files: List<File>, mime: String, subject: String) {
+    if (files.isEmpty()) return
+    val uris = ArrayList(files.map { FileProvider.getUriForFile(context, "${context.packageName}.files", it) })
+    val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+        type = mime
+        putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+        putExtra(Intent.EXTRA_SUBJECT, subject)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, subject))
+}
+
+private val zaLocale = Locale("en", "ZA")
+private val currencyFormat = NumberFormat.getCurrencyInstance(zaLocale)
+private val displayDate = DateTimeFormatter.ofPattern("dd MMM yyyy", zaLocale)
+
+private fun money(cents: Long): String = currencyFormat.format(cents / 100.0)
+private fun plainMoney(cents: Long): String = String.format(Locale.US, "%.2f", cents / 100.0)
+private fun dateText(epochDay: Long): String = LocalDate.ofEpochDay(epochDay).format(displayDate)
+
+private fun parseMoney(text: String): Long? {
+    val cleaned = text.trim().replace("R", "", ignoreCase = true).replace(" ", "")
+    if (cleaned.isBlank()) return null
+    val normalized = when {
+        cleaned.contains(',') && cleaned.substringAfterLast(',').length == 2 -> cleaned.replace(".", "").replace(',', '.')
+        else -> cleaned.replace(",", "")
+    }
+    return normalized.toBigDecimalOrNull()?.movePointRight(2)?.toLong()
+}
+
+private fun parseDate(text: String): Long? = try {
+    if (text.isBlank()) null else LocalDate.parse(text.trim()).toEpochDay()
+} catch (_: DateTimeParseException) { null }
