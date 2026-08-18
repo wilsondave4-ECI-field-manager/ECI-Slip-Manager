@@ -29,6 +29,16 @@ class SlipRepository(context: Context) {
     fun saveSlip(item: Slip): Long = db.upsertSlip(item).also { refresh() }
     fun saveReturn(item: MoneyReturn): Long = db.upsertReturn(item).also { refresh() }
 
+    fun archiveAdvance(item: Advance, archived: Boolean) {
+        db.upsertAdvance(
+            item.copy(
+                archived = archived,
+                archivedAtMillis = if (archived) (item.archivedAtMillis ?: System.currentTimeMillis()) else null
+            )
+        )
+        refresh()
+    }
+
     fun deleteAdvance(item: Advance) {
         db.deleteAdvance(item.id)
         refresh()
