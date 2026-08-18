@@ -79,19 +79,19 @@ jobs:
       - name: Build Android APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Persist verified source
-        run: |
-          git pull --rebase origin ${GITHUB_REF_NAME}
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/za/co/eci/slipmanager/ui/SlipApp.kt
-          if ! git diff --cached --quiet; then
-            git commit -m "Apply ECI Slip Manager v0.5.1 source [skip ci]"
-            git push origin HEAD:${GITHUB_REF_NAME}
-          fi
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ECI-Slip-Manager-v0.5.1-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Persist verified source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/za/co/eci/slipmanager/ui/SlipApp.kt
+          if ! git diff --cached --quiet; then
+            git commit -m "Apply ECI Slip Manager v0.5.1 source [skip ci]"
+          fi
+          git pull --rebase origin ${GITHUB_REF_NAME}
+          git push origin HEAD:${GITHUB_REF_NAME}
