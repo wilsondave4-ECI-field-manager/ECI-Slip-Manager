@@ -40,5 +40,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ECI-Slip-Manager-v0.4-debug
+          name: ECI-Slip-Manager-v0.4.1-debug
           path: app/build/outputs/apk/debug/app-debug.apk
