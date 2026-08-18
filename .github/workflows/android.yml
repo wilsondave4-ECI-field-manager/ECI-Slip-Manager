@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
 
 jobs:
   build:
@@ -21,7 +23,7 @@ jobs:
       - name: Install Android SDK 36
         run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
       - name: Build debug APK
-        run: gradle :app:assembleDebug
+        run: gradle :app:assembleDebug --stacktrace
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
