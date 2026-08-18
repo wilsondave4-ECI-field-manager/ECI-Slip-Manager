@@ -358,7 +358,12 @@ private fun HomeScreen(
     }
     val selectedAdvance = dashboardAdvances.firstOrNull { it.id == selectedAdvanceId }
     val rec = selectedAdvanceId?.let { repository.reconciliation(it) } ?: repository.reconciliation()
-    val visibleSlips = if (selectedAdvanceId == null) slips else slips.filter { it.advanceId == selectedAdvanceId }
+    val activeAdvanceIds = advances.asSequence().filterNot { it.archived }.map { it.id }.toSet()
+    val visibleSlips = when {
+        selectedAdvanceId == null -> slips.filter { it.advanceId != null && it.advanceId in activeAdvanceIds }
+        selectedAdvance?.archived == true -> emptyList()
+        else -> slips.filter { it.advanceId == selectedAdvanceId }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -648,7 +653,7 @@ private fun ReturnMoneyDialog(advance: Advance, onDismiss: () -> Unit, onSave: (
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 MoneyField("Amount returned", amount, { amount = it })
                 DateField(date, { date = it })
-                TextFieldSimple("Notes", notes, { notes = it })
+                TextFieldSimple("Reason for money returned", notes, { notes = it })
             }
         },
         confirmButton = {
@@ -778,7 +783,7 @@ private fun EditSlipScreen(
     var project by remember(original.id, original.imagePath) { mutableStateOf(original.project) }
     var paymentRef by remember(original.id, original.imagePath) { mutableStateOf(original.paymentReference) }
     var selectedAdvanceId by remember(original.id, original.imagePath) {
-        mutableStateOf(original.advanceId ?: if (original.id == 0L) advances.firstOrNull()?.id else null)
+        mutableStateOf(original.advanceId ?: if (original.id == 0L) advances.firstOrNull { !it.archived }?.id else null)
     }
     var deleteConfirm by remember { mutableStateOf(false) }
 
