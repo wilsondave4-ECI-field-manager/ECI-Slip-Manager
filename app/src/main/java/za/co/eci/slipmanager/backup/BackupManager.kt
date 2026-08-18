@@ -22,7 +22,7 @@ object BackupManager {
         val outDir = File(context.cacheDir, "backup").apply { mkdirs() }
         val file = File(outDir, "ECI_Slip_Manager_Backup_${System.currentTimeMillis()}.zip")
         val json = JSONObject().apply {
-            put("version", 1)
+            put("version", 2)
             put("advances", JSONArray().apply { advances.forEach { put(advanceJson(it)) } })
             put("slips", JSONArray().apply { slips.forEach { put(slipJson(it)) } })
             put("returns", JSONArray().apply { returns.forEach { put(returnJson(it)) } })
@@ -70,6 +70,8 @@ object BackupManager {
     private fun advanceJson(a: Advance) = JSONObject().apply {
         put("id", a.id); put("date", a.dateEpochDay); put("amount", a.amountCents)
         put("reference", a.reference); put("project", a.project); put("notes", a.notes)
+        put("archived", a.archived)
+        if (a.archivedAtMillis == null) put("archivedAt", JSONObject.NULL) else put("archivedAt", a.archivedAtMillis)
     }
     private fun slipJson(s: Slip) = JSONObject().apply {
         put("id", s.id); if (s.advanceId == null) put("advanceId", JSONObject.NULL) else put("advanceId", s.advanceId)
@@ -85,7 +87,16 @@ object BackupManager {
         put("id", r.id); put("advanceId", r.advanceId); put("date", r.dateEpochDay); put("amount", r.amountCents); put("notes", r.notes)
     }
 
-    private fun advanceFromJson(o: JSONObject) = Advance(o.getLong("id"), o.getLong("date"), o.getLong("amount"), o.optString("reference"), o.optString("project"), o.optString("notes"))
+    private fun advanceFromJson(o: JSONObject) = Advance(
+        id = o.getLong("id"),
+        dateEpochDay = o.getLong("date"),
+        amountCents = o.getLong("amount"),
+        reference = o.optString("reference"),
+        project = o.optString("project"),
+        notes = o.optString("notes"),
+        archived = o.optBoolean("archived", false),
+        archivedAtMillis = if (!o.has("archivedAt") || o.isNull("archivedAt")) null else o.getLong("archivedAt")
+    )
     private fun slipFromJson(o: JSONObject) = Slip(
         id = o.getLong("id"),
         advanceId = if (o.isNull("advanceId")) null else o.getLong("advanceId"),
