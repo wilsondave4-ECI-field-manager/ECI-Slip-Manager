@@ -2,6 +2,10 @@ name: Build Signed Android APK
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/release_v07_trigger.txt"
 
 jobs:
   build-release:
