@@ -29,6 +29,11 @@ class SlipRepository(context: Context) {
     fun saveSlip(item: Slip): Long = db.upsertSlip(item).also { refresh() }
     fun saveReturn(item: MoneyReturn): Long = db.upsertReturn(item).also { refresh() }
 
+    fun deleteAdvance(item: Advance) {
+        db.deleteAdvance(item.id)
+        refresh()
+    }
+
     fun deleteSlip(item: Slip) {
         db.deleteSlip(item.id)
         if (item.imagePath.isNotBlank()) runCatching { java.io.File(item.imagePath).delete() }

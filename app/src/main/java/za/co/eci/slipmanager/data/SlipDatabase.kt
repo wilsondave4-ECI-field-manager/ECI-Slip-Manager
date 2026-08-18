@@ -191,6 +191,10 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         writableDatabase.delete("slips", "id=?", arrayOf(id.toString()))
     }
 
+    fun deleteAdvance(id: Long) {
+        writableDatabase.delete("advances", "id=?", arrayOf(id.toString()))
+    }
+
     fun replaceAll(advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
         val db = writableDatabase
         db.beginTransaction()

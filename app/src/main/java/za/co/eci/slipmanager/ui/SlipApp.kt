@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -56,6 +57,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -215,7 +217,7 @@ fun SlipApp(repository: SlipRepository) {
                     onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
                     onScan = ::startScan
                 )
-                Screen.ADVANCES -> AdvancesScreen(repository, advances, slips, returns)
+                Screen.ADVANCES -> AdvancesScreen(repository, advances, slips, returns, onDone = { screen = Screen.HOME })
                 Screen.SLIPS -> SlipsScreen(
                     slips = slips,
                     onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
@@ -311,7 +313,15 @@ private fun HomeScreen(
     onSlip: (Slip) -> Unit,
     onScan: () -> Unit
 ) {
-    val rec = repository.reconciliation()
+    var selectedAdvanceId by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(advances) {
+        val newest = advances.firstOrNull()?.id
+        if (selectedAdvanceId == null || advances.none { it.id == selectedAdvanceId }) selectedAdvanceId = newest
+    }
+    val selectedAdvance = advances.firstOrNull { it.id == selectedAdvanceId }
+    val rec = selectedAdvanceId?.let { repository.reconciliation(it) } ?: repository.reconciliation()
+    val visibleSlips = if (selectedAdvanceId == null) slips else slips.filter { it.advanceId == selectedAdvanceId }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
@@ -320,9 +330,24 @@ private fun HomeScreen(
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)) {
                 Column(Modifier.fillMaxWidth().padding(18.dp)) {
-                    Text("AVAILABLE BALANCE", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelLarge)
+                    Text("ADVANCE BALANCE", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelLarge)
                     Text(money(rec.outstandingCents), color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    selectedAdvance?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "${it.project.ifBlank { "Advance #${it.id}" }} • ${dateText(it.dateEpochDay)}",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
+            }
+        }
+        item {
+            OutlinedButton(onClick = onAdvances, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Icon(Icons.Default.Add, null)
+                Spacer(Modifier.width(8.dp))
+                Text("MONEY RECEIVED / ADVANCES", fontWeight = FontWeight.Bold)
             }
         }
         item {
@@ -334,7 +359,7 @@ private fun HomeScreen(
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MiniTotal("Returned", rec.returnedCents, Modifier.weight(1f))
-                MiniTotal("Slips", slips.size.toLong(), Modifier.weight(1f), asCount = true)
+                MiniTotal("Slips", visibleSlips.size.toLong(), Modifier.weight(1f), asCount = true)
             }
         }
         item {
@@ -344,20 +369,55 @@ private fun HomeScreen(
                 Text("SCAN SLIP", fontWeight = FontWeight.Bold)
             }
         }
-        item {
-            OutlinedButton(onClick = onAdvances, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("Money Received / Advances")
-            }
-        }
         if (advances.isEmpty()) item { InfoCard("Start here", "Add the money paid into your account, then scan slips against it.") }
-        val incomplete = slips.filterNot { it.isComplete }.take(5)
+
+        val incomplete = visibleSlips.filterNot { it.isComplete }.take(5)
         if (incomplete.isNotEmpty()) {
             item { SectionTitle("Needs attention") }
             items(incomplete, key = { it.id }) { slip -> SlipCard(slip, onSlip) }
         }
-        if (slips.isNotEmpty()) {
-            item { SectionTitle("Recent slips") }
-            items(slips.take(5), key = { it.id }) { slip -> SlipCard(slip, onSlip) }
+
+        if (advances.isNotEmpty()) {
+            item { SectionTitle("Loaded advances") }
+            item {
+                AdvanceSelectorRow(
+                    advances = advances,
+                    selectedId = selectedAdvanceId,
+                    onSelected = { selectedAdvanceId = it }
+                )
+            }
+        }
+
+        item { SectionTitle("Recent slips") }
+        if (visibleSlips.isEmpty()) {
+            item { InfoCard("No slips for this advance", "Scan a slip and it will be allocated to the newest advance by default.") }
+        } else {
+            items(visibleSlips.take(8), key = { it.id }) { slip -> SlipCard(slip, onSlip) }
+        }
+    }
+}
+
+@Composable
+private fun AdvanceSelectorRow(advances: List<Advance>, selectedId: Long?, onSelected: (Long) -> Unit) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(advances, key = { it.id }) { advance ->
+            val selected = advance.id == selectedId
+            val label = advance.project.ifBlank { "Advance #${advance.id}" }
+            if (selected) {
+                Button(onClick = { onSelected(advance.id) }) {
+                    Column {
+                        Text(label, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text("${dateText(advance.dateEpochDay)} • ${money(advance.amountCents)}", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            } else {
+                OutlinedButton(onClick = { onSelected(advance.id) }) {
+                    Column {
+                        Text(label, maxLines = 1)
+                        Text("${dateText(advance.dateEpochDay)} • ${money(advance.amountCents)}", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
         }
     }
 }
@@ -381,21 +441,48 @@ private fun InfoCard(title: String, body: String) {
 private fun SectionTitle(text: String) = Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
 @Composable
-private fun AdvancesScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>) {
+private fun AdvancesScreen(
+    repository: SlipRepository,
+    advances: List<Advance>,
+    slips: List<Slip>,
+    returns: List<MoneyReturn>,
+    onDone: () -> Unit
+) {
     var amount by remember { mutableStateOf("") }
     var date by remember { mutableStateOf(LocalDate.now().toString()) }
     var reference by remember { mutableStateOf("") }
     var project by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
+    var editingAdvance by remember { mutableStateOf<Advance?>(null) }
+    var deleteAdvance by remember { mutableStateOf<Advance?>(null) }
     var returnAdvance by remember { mutableStateOf<Advance?>(null) }
     val context = LocalContext.current
+
+    fun clearForm() {
+        editingAdvance = null
+        amount = ""
+        date = LocalDate.now().toString()
+        reference = ""
+        project = ""
+        notes = ""
+    }
+
+    LaunchedEffect(editingAdvance?.id) {
+        editingAdvance?.let { item ->
+            amount = plainMoney(item.amountCents)
+            date = LocalDate.ofEpochDay(item.dateEpochDay).toString()
+            reference = item.reference
+            project = item.project
+            notes = item.notes
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item { SectionTitle("Add money received") }
+        item { SectionTitle(if (editingAdvance == null) "Add money received" else "Correct money received") }
         item { MoneyField("Amount received", amount, { amount = it }) }
         item { DateField(date, { date = it }) }
         item { TextFieldSimple("Bank / payment reference", reference, { reference = it }) }
@@ -410,11 +497,24 @@ private fun AdvancesScreen(repository: SlipRepository, advances: List<Advance>, 
                     if (cents == null || cents <= 0 || epoch == null) {
                         Toast.makeText(context, "Enter a valid amount and date.", Toast.LENGTH_SHORT).show()
                     } else {
-                        repository.saveAdvance(Advance(dateEpochDay = epoch, amountCents = cents, reference = reference.trim(), project = project.trim(), notes = notes.trim()))
-                        amount = ""; reference = ""; project = ""; notes = ""; date = LocalDate.now().toString()
+                        repository.saveAdvance(
+                            Advance(
+                                id = editingAdvance?.id ?: 0L,
+                                dateEpochDay = epoch,
+                                amountCents = cents,
+                                reference = reference.trim(),
+                                project = project.trim(),
+                                notes = notes.trim()
+                            )
+                        )
+                        clearForm()
+                        onDone()
                     }
                 }
-            ) { Text("Save money received") }
+            ) { Text(if (editingAdvance == null) "Save money received" else "Save correction") }
+        }
+        if (editingAdvance != null) {
+            item { OutlinedButton(onClick = { clearForm() }, modifier = Modifier.fillMaxWidth()) { Text("Cancel correction") } }
         }
         if (advances.isNotEmpty()) item { SectionTitle("Advances") }
         items(advances, key = { it.id }) { advance ->
@@ -428,6 +528,10 @@ private fun AdvancesScreen(repository: SlipRepository, advances: List<Advance>, 
                     Text("Received ${money(advance.amountCents)}")
                     Text("Slips ${money(spent)} • Returned ${money(returned)}")
                     Text("Balance ${money(advance.amountCents - spent - returned)}", fontWeight = FontWeight.Bold)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        TextButton(onClick = { editingAdvance = advance }) { Text("Edit") }
+                        TextButton(onClick = { deleteAdvance = advance }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                    }
                     TextButton(onClick = { returnAdvance = advance }) { Text("Record money returned") }
                 }
             }
@@ -439,6 +543,25 @@ private fun AdvancesScreen(repository: SlipRepository, advances: List<Advance>, 
             repository.saveReturn(item)
             returnAdvance = null
         }
+    }
+
+    deleteAdvance?.let { advance ->
+        AlertDialog(
+            onDismissRequest = { deleteAdvance = null },
+            title = { Text("Delete money received?") },
+            text = {
+                Text("This deletes the selected money-received entry. Slips already allocated to it will remain in the app but become unallocated. Any money-return records linked to this advance will also be removed.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    repository.deleteAdvance(advance)
+                    deleteAdvance = null
+                    clearForm()
+                    onDone()
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteAdvance = null }) { Text("Cancel") } }
+        )
     }
 }
 
@@ -523,7 +646,9 @@ private fun EditSlipScreen(
     var purpose by remember(original.id, original.imagePath) { mutableStateOf(original.purpose) }
     var project by remember(original.id, original.imagePath) { mutableStateOf(original.project) }
     var paymentRef by remember(original.id, original.imagePath) { mutableStateOf(original.paymentReference) }
-    var selectedAdvanceId by remember(original.id, original.imagePath) { mutableStateOf(original.advanceId) }
+    var selectedAdvanceId by remember(original.id, original.imagePath) {
+        mutableStateOf(original.advanceId ?: if (original.id == 0L) advances.firstOrNull()?.id else null)
+    }
     var deleteConfirm by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
