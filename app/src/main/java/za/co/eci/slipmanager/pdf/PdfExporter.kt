@@ -43,14 +43,20 @@ object PdfExporter {
         var pageNo = 1
         var page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, pageNo++).create())
         var y = 48f
-        val canvas = page.canvas
         val heading = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 22f; isFakeBoldText = true }
         val sub = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 12f; isFakeBoldText = true }
         val body = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 10f }
+        val bodySmall = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 9f }
         val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = 1f }
 
-        canvas.drawText("ECI Slip Manager", 36f, y, heading); y += 28f
-        canvas.drawText(title, 36f, y, sub); y += 26f
+        fun newTextPage() {
+            doc.finishPage(page)
+            page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, pageNo++).create())
+            y = 45f
+        }
+
+        canvasOf(page).drawText("ECI Slip Manager", 36f, y, heading); y += 28f
+        canvasOf(page).drawText(title, 36f, y, sub); y += 26f
 
         val received = advances.sumOf { it.amountCents }
         val slipTotal = slips.sumOf { it.totalCents }
@@ -63,25 +69,60 @@ object PdfExporter {
             "Money returned: ${fmt(returned)}",
             "Outstanding balance: ${fmt(outstanding)}",
             "Number of slips: ${slips.size}"
-        ).forEach { canvas.drawText(it, 36f, y, body); y += 18f }
+        ).forEach {
+            canvasOf(page).drawText(it, 36f, y, body)
+            y += 18f
+        }
 
+        if (returns.isNotEmpty()) {
+            y += 4f
+            canvasOf(page).drawText("Money returned details", 36f, y, sub)
+            y += 18f
+
+            returns.sortedByDescending { it.dateEpochDay }.forEach { returnedMoney ->
+                if (y > 755f) newTextPage()
+
+                val date = LocalDate.ofEpochDay(returnedMoney.dateEpochDay).format(dateFmt)
+                val advance = advances.firstOrNull { it.id == returnedMoney.advanceId }
+                val advanceLabel = advance?.project?.ifBlank { "Advance #${advance.id}" }
+                    ?: "Advance #${returnedMoney.advanceId}"
+
+                canvasOf(page).drawText(
+                    "$date  |  ${fmt(returnedMoney.amountCents)}  |  $advanceLabel",
+                    42f,
+                    y,
+                    body
+                )
+                y += 14f
+
+                val reason = returnedMoney.notes.trim().ifBlank { "No reason entered" }
+                wrapText("Reason: $reason", 82).forEach { reasonLine ->
+                    if (y > 770f) newTextPage()
+                    canvasOf(page).drawText(reasonLine, 54f, y, bodySmall)
+                    y += 13f
+                }
+                y += 5f
+            }
+        }
+
+        if (y > 765f) newTextPage()
         y += 10f
-        canvas.drawLine(36f, y, PAGE_W - 36f, y, line); y += 22f
-        canvas.drawText("Slip register", 36f, y, sub); y += 20f
+        canvasOf(page).drawLine(36f, y, PAGE_W - 36f, y, line); y += 22f
+        canvasOf(page).drawText("Slip register", 36f, y, sub); y += 20f
 
         slips.sortedByDescending { it.dateEpochDay ?: Long.MIN_VALUE }.forEachIndexed { index, slip ->
-            if (y > 790f) {
-                doc.finishPage(page)
-                page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, pageNo++).create())
-                y = 45f
-            }
+            if (y > 790f) newTextPage()
             val date = slip.dateEpochDay?.let { LocalDate.ofEpochDay(it).format(dateFmt) } ?: "Date missing"
             val supplier = slip.supplier.ifBlank { "Supplier missing" }
             val purpose = slip.purpose.ifBlank { "Purpose missing" }
             canvasOf(page).drawText("${index + 1}. $date  |  $supplier  |  ${fmt(slip.totalCents)}", 36f, y, body)
             y += 14f
-            canvasOf(page).drawText("    $purpose", 36f, y, body)
-            y += 18f
+            wrapText("    $purpose", 88).forEach { purposeLine ->
+                if (y > 790f) newTextPage()
+                canvasOf(page).drawText(purposeLine, 36f, y, body)
+                y += 14f
+            }
+            y += 4f
         }
         doc.finishPage(page)
 
@@ -191,6 +232,25 @@ object PdfExporter {
             RectF(left, top, left + w, top + h),
             Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         )
+    }
+
+    private fun wrapText(text: String, maxChars: Int): List<String> {
+        if (text.length <= maxChars) return listOf(text)
+        val words = text.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val lines = mutableListOf<String>()
+        var current = StringBuilder()
+        for (word in words) {
+            if (current.isEmpty()) {
+                current.append(word)
+            } else if (current.length + 1 + word.length <= maxChars) {
+                current.append(' ').append(word)
+            } else {
+                lines += current.toString()
+                current = StringBuilder(word)
+            }
+        }
+        if (current.isNotEmpty()) lines += current.toString()
+        return lines.ifEmpty { listOf(text) }
     }
 
     private fun canvasOf(page: PdfDocument.Page): Canvas = page.canvas
