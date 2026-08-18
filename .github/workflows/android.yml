@@ -13,6 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Record workflow run ID
+        run: |
+          echo "$GITHUB_RUN_ID" > .github/latest_run_id.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/latest_run_id.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Record latest Android build run [skip ci]"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -25,17 +35,6 @@ jobs:
           packages: platform-tools
       - name: Install Android SDK 36
         run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
-      - name: Apply ECI Slip Manager v0.2 changes
-        run: python tools/apply_v02.py
-      - name: Persist v0.2 source changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/za/co/eci/slipmanager app/build.gradle.kts
-          if ! git diff --cached --quiet; then
-            git commit -m "Apply ECI Slip Manager v0.2 source changes [skip ci]"
-            git push origin HEAD:${GITHUB_REF_NAME}
-          fi
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
       - name: Upload APK
