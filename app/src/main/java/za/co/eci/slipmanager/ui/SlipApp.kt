@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -108,6 +109,8 @@ fun SlipApp(repository: SlipRepository) {
     var pendingImageFile by remember { mutableStateOf<File?>(null) }
     var processingOcr by remember { mutableStateOf(false) }
     var lastBackMillis by remember { mutableLongStateOf(0L) }
+    val crashFile = remember { File(context.filesDir, "last_crash.txt") }
+    var showPreviousCrash by remember { mutableStateOf(crashFile.exists()) }
 
     fun makeReceiptFile(): File {
         val dir = File(context.filesDir, "receipts").apply { mkdirs() }
@@ -182,6 +185,7 @@ fun SlipApp(repository: SlipRepository) {
     }
 
     Scaffold(
+        modifier = Modifier.fillMaxSize().safeDrawingPadding(),
         topBar = {
             AppTopBar(
                 title = when (screen) {
@@ -264,6 +268,27 @@ fun SlipApp(repository: SlipRepository) {
             }
         }
     }
+
+    if (showPreviousCrash && crashFile.exists()) {
+        AlertDialog(
+            onDismissRequest = { showPreviousCrash = false },
+            title = { Text("Previous crash detected") },
+            text = { Text("ECI Slip Manager saved the Android crash details. Share the log so the exact cause can be fixed, or dismiss it to continue using the app.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching { shareFile(context, crashFile, "text/plain", "ECI Slip Manager Crash Log") }
+                        .onFailure { Toast.makeText(context, "Could not share crash log: ${it.message}", Toast.LENGTH_LONG).show() }
+                }) { Text("Share crash log") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    crashFile.delete()
+                    showPreviousCrash = false
+                }) { Text("Dismiss") }
+            }
+        )
+    }
+
 }
 
 @Composable
