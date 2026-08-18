@@ -29,13 +29,9 @@ jobs:
         env:
           KEYSTORE_B64: ${{ secrets.ECI_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.ECI_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ECI_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ECI_KEY_PASSWORD }}
         run: |
           test -n "$KEYSTORE_B64" || (echo "Missing ECI_KEYSTORE_BASE64" && exit 1)
           test -n "$STORE_PASSWORD" || (echo "Missing ECI_KEYSTORE_PASSWORD" && exit 1)
-          test -n "$KEY_ALIAS" || (echo "Missing ECI_KEY_ALIAS" && exit 1)
-          test -n "$KEY_PASSWORD" || (echo "Missing ECI_KEY_PASSWORD" && exit 1)
 
       - name: Restore permanent signing keystore
         env:
@@ -46,8 +42,6 @@ jobs:
         env:
           ECI_KEYSTORE_PATH: ${{ runner.temp }}/ECI-Slip-Manager-release.p12
           ECI_KEYSTORE_PASSWORD: ${{ secrets.ECI_KEYSTORE_PASSWORD }}
-          ECI_KEY_ALIAS: ${{ secrets.ECI_KEY_ALIAS }}
-          ECI_KEY_PASSWORD: ${{ secrets.ECI_KEY_PASSWORD }}
         run: gradle :app:assembleRelease --stacktrace
 
       - name: Upload signed APK
