@@ -19,6 +19,7 @@ data class PersonalReportArchiveEntry(
     val toReimbursementIdInclusive: Long,
     val usedCents: Long,
     val reimbursedCents: Long,
+    val documentNumber: String,
     val pdfFileName: String
 )
 
@@ -44,6 +45,7 @@ class PersonalReportArchiveStore(context: Context) {
                             toReimbursementIdInclusive = o.optLong("toReimbursementIdInclusive", 0L),
                             usedCents = o.getLong("usedCents"),
                             reimbursedCents = o.getLong("reimbursedCents"),
+                            documentNumber = o.optString("documentNumber", ""),
                             pdfFileName = o.getString("pdfFileName")
                         )
                     )
@@ -90,7 +92,8 @@ class PersonalReportArchiveStore(context: Context) {
     fun closeIfSettled(
         slips: List<Slip>,
         reimbursements: List<Reimbursement>,
-        createReport: (List<Slip>, List<Reimbursement>) -> File
+        documentNumber: String,
+        createReport: (List<Slip>, List<Reimbursement>, String) -> File
     ): PersonalReportArchiveEntry? {
         val existing = entries()
         val fromSlip = existing.maxOfOrNull { it.toSlipIdInclusive } ?: 0L
@@ -103,8 +106,9 @@ class PersonalReportArchiveStore(context: Context) {
         if (used <= 0L || reimbursed != used) return null
 
         val now = System.currentTimeMillis()
-        val tempPdf = createReport(settlementSlips, settlementReimbursements)
-        val fileName = "ECI_Own_Money_Settlement_${now}.pdf"
+        val tempPdf = createReport(settlementSlips, settlementReimbursements, documentNumber)
+        val safeNumber = documentNumber.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val fileName = "${safeNumber}_Personal_Funds.pdf"
         val permanentPdf = File(reportsDir, fileName)
         tempPdf.copyTo(permanentPdf, overwrite = true)
 
@@ -117,6 +121,7 @@ class PersonalReportArchiveStore(context: Context) {
             toReimbursementIdInclusive = settlementReimbursements.maxOfOrNull { it.id } ?: fromReimbursement,
             usedCents = used,
             reimbursedCents = reimbursed,
+            documentNumber = documentNumber,
             pdfFileName = fileName
         )
         save(existing + entry)
@@ -143,6 +148,7 @@ class PersonalReportArchiveStore(context: Context) {
                 put("toReimbursementIdInclusive", item.toReimbursementIdInclusive)
                 put("usedCents", item.usedCents)
                 put("reimbursedCents", item.reimbursedCents)
+                put("documentNumber", item.documentNumber)
                 put("pdfFileName", item.pdfFileName)
             })
         }
