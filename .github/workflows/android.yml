@@ -5,7 +5,8 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - ".github/release_v07_trigger.txt"
+      - "app/**"
+      - ".github/workflows/android.yml"
 
 jobs:
   build-release:
@@ -51,5 +52,5 @@ jobs:
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: ECI-Slip-Manager-v0.7-signed
+          name: ECI-Slip-Manager-v0.7.1-signed
           path: app/build/outputs/apk/release/app-release.apk
