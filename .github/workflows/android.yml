@@ -26,19 +26,6 @@ jobs:
           git commit -m "Record signed release run [skip ci]"
           git push
 
-      - name: Apply v0.7.5 rollover and document numbering
-        run: python .github/scripts/apply_v075_rollover.py
-
-      - name: Persist v0.7.5 source
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app
-          if ! git diff --cached --quiet; then
-            git commit -m "Apply advance rollover and document numbering v0.7.5 [skip ci]"
-            git push
-          fi
-
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
