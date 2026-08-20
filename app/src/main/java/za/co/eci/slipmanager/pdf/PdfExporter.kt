@@ -69,6 +69,10 @@ object PdfExporter {
         val personalUsed = slips.sumOf { it.ownMoneyCents }
         val reimbursed = reimbursements.sumOf { it.amountCents }
         val personalOutstanding = personalUsed - reimbursed
+        val receiptTotal = slips.sumOf { it.totalCents }
+        val vatCaptured = slips.sumOf { it.vatCents ?: 0L }
+        val exVatFromCaptured = (receiptTotal - vatCaptured).coerceAtLeast(0L)
+        val missingVatCount = slips.count { it.vatCents == null }
 
         listOf(
             "Money received: ${fmt(received)}",
@@ -78,6 +82,16 @@ object PdfExporter {
             "Number of slips: ${slips.size}"
         ).forEach {
             canvasOf(page).drawText(it, 36f, y, body)
+            y += 18f
+        }
+
+        y += 4f
+        canvasOf(page).drawText("VAT summary", 36f, y, sub); y += 18f
+        canvasOf(page).drawText("Receipt value incl. VAT where applicable: ${fmt(receiptTotal)}", 42f, y, body); y += 15f
+        canvasOf(page).drawText("VAT captured: ${fmt(vatCaptured)}", 42f, y, body); y += 15f
+        canvasOf(page).drawText("Receipt value less captured VAT: ${fmt(exVatFromCaptured)}", 42f, y, body); y += 15f
+        if (missingVatCount > 0) {
+            canvasOf(page).drawText("VAT NOT CAPTURED on $missingVatCount slip${if (missingVatCount == 1) "" else "s"}", 42f, y, sub)
             y += 18f
         }
 
@@ -138,12 +152,18 @@ object PdfExporter {
         canvasOf(page).drawText("Slip register", 36f, y, sub); y += 20f
 
         slips.sortedByDescending { it.dateEpochDay ?: Long.MIN_VALUE }.forEachIndexed { index, slip ->
-            if (y > 770f) newTextPage()
+            if (y > 750f) newTextPage()
             val date = slip.dateEpochDay?.let { LocalDate.ofEpochDay(it).format(dateFmt) } ?: "Date missing"
             val supplier = slip.supplier.ifBlank { "Supplier missing" }
             val purpose = slip.purpose.ifBlank { "Purpose missing" }
+            val vatText = slip.vatCents?.let(::fmt) ?: "NOT CAPTURED"
+            val exVatText = slip.subtotalCents?.let(::fmt)
+                ?: slip.vatCents?.let { fmt((slip.totalCents - it).coerceAtLeast(0L)) }
+                ?: "NOT CAPTURED"
             canvasOf(page).drawText("${index + 1}. $date  |  $supplier  |  Receipt ${fmt(slip.totalCents)}", 36f, y, body)
             y += 14f
+            canvasOf(page).drawText("    Ex VAT: $exVatText  |  VAT: $vatText  |  Total: ${fmt(slip.totalCents)}", 36f, y, bodySmall)
+            y += 13f
             val funding = when (slip.paymentType) {
                 PaymentType.ADVANCE -> "Company advance ${fmt(slip.companyPaidCents)}"
                 PaymentType.OWN -> "Own money ${fmt(slip.ownMoneyCents)}"
@@ -232,8 +252,12 @@ object PdfExporter {
     private fun drawReceiptPage(canvas: Canvas, bitmap: Bitmap, slip: Slip) {
         val head = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 13f; isFakeBoldText = true }
         val body = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 9f }
+        val vatText = slip.vatCents?.let(::fmt) ?: "NOT CAPTURED"
+        val exVatText = slip.subtotalCents?.let(::fmt)
+            ?: slip.vatCents?.let { fmt((slip.totalCents - it).coerceAtLeast(0L)) }
+            ?: "NOT CAPTURED"
         canvas.drawText(slip.supplier.ifBlank { "Receipt" }, 30f, 30f, head)
-        canvas.drawText("Total ${fmt(slip.totalCents)}", 30f, 46f, body)
+        canvas.drawText("Ex VAT $exVatText   |   VAT $vatText   |   Total ${fmt(slip.totalCents)}", 30f, 46f, body)
         drawImageOnly(canvas, bitmap, top = 62f)
     }
 
