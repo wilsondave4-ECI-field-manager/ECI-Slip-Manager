@@ -1,5 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+// v0.7.3 document scanner release
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
