@@ -6,6 +6,7 @@ import org.json.JSONObject
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.MoneyReturn
 import za.co.eci.slipmanager.data.PaymentType
+import za.co.eci.slipmanager.data.PersonalReportArchiveStore
 import za.co.eci.slipmanager.data.Reimbursement
 import za.co.eci.slipmanager.data.Slip
 import java.io.File
@@ -25,7 +26,7 @@ object BackupManager {
         val outDir = File(context.cacheDir, "backup").apply { mkdirs() }
         val file = File(outDir, "ECI_Slip_Manager_Backup_${System.currentTimeMillis()}.zip")
         val json = JSONObject().apply {
-            put("version", 3)
+            put("version", 4)
             put("advances", JSONArray().apply { advances.forEach { put(advanceJson(it)) } })
             put("slips", JSONArray().apply { slips.forEach { put(slipJson(it)) } })
             put("returns", JSONArray().apply { returns.forEach { put(returnJson(it)) } })
@@ -42,6 +43,18 @@ object BackupManager {
                     src.inputStream().use { it.copyTo(zip) }
                     zip.closeEntry()
                 }
+            }
+            val archiveMetadata = File(context.filesDir, PersonalReportArchiveStore.METADATA_FILE_NAME)
+            if (archiveMetadata.exists()) {
+                zip.putNextEntry(ZipEntry("report_archive/${PersonalReportArchiveStore.METADATA_FILE_NAME}"))
+                archiveMetadata.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+            val archivedReports = File(context.filesDir, PersonalReportArchiveStore.REPORTS_DIR_NAME)
+            archivedReports.listFiles()?.filter { it.isFile }?.forEach { report ->
+                zip.putNextEntry(ZipEntry("report_archive/reports/${report.name}"))
+                report.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
             }
         }
         return file
@@ -75,6 +88,22 @@ object BackupManager {
                     slip.copy(imagePath = target.absolutePath)
                 } else slip
             }
+
+            val archiveMetadata = File(context.filesDir, PersonalReportArchiveStore.METADATA_FILE_NAME)
+            val archiveReportsDir = File(context.filesDir, PersonalReportArchiveStore.REPORTS_DIR_NAME)
+            archiveMetadata.delete()
+            archiveReportsDir.deleteRecursively()
+            archiveReportsDir.mkdirs()
+            zip.getEntry("report_archive/${PersonalReportArchiveStore.METADATA_FILE_NAME}")?.let { entry ->
+                zip.getInputStream(entry).use { input -> archiveMetadata.outputStream().use { input.copyTo(it) } }
+            }
+            zip.entries().asSequence()
+                .filter { !it.isDirectory && it.name.startsWith("report_archive/reports/") }
+                .forEach { entry ->
+                    val target = File(archiveReportsDir, File(entry.name).name)
+                    zip.getInputStream(entry).use { input -> target.outputStream().use { input.copyTo(it) } }
+                }
+
             return Restored(advances, slips, returns, reimbursements)
         }
     }

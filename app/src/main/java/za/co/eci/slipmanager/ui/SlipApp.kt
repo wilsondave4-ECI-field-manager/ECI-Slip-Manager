@@ -89,6 +89,8 @@ import za.co.eci.slipmanager.backup.BackupManager
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.MoneyReturn
 import za.co.eci.slipmanager.data.PaymentType
+import za.co.eci.slipmanager.data.PersonalFundsSummary
+import za.co.eci.slipmanager.data.PersonalReportArchiveStore
 import za.co.eci.slipmanager.data.Reimbursement
 import za.co.eci.slipmanager.data.Slip
 import za.co.eci.slipmanager.data.SlipRepository
@@ -113,6 +115,11 @@ fun SlipApp(repository: SlipRepository) {
     val slips by repository.slips.collectAsState()
     val returns by repository.returns.collectAsState()
     val reimbursements by repository.reimbursements.collectAsState()
+    val personalArchiveStore = remember { PersonalReportArchiveStore(context) }
+    var personalArchiveRevision by remember { mutableLongStateOf(0L) }
+    val personalSummary = remember(slips, reimbursements, personalArchiveRevision) {
+        personalArchiveStore.currentSummary(slips, reimbursements)
+    }
 
     var screen by remember { mutableStateOf(Screen.HOME) }
     var editingSlip by remember { mutableStateOf<Slip?>(null) }
@@ -239,6 +246,40 @@ fun SlipApp(repository: SlipRepository) {
             }
     }
 
+    LaunchedEffect(advances, slips, returns) {
+        advances.filterNot { it.archived }.forEach { advance ->
+            val hasActivity = slips.any { it.advanceId == advance.id } || returns.any { it.advanceId == advance.id }
+            if (hasActivity && repository.reconciliation(advance.id).outstandingCents == 0L) {
+                repository.archiveAdvance(advance, true)
+            }
+        }
+    }
+
+    LaunchedEffect(slips, reimbursements) {
+        val livePersonal = personalArchiveStore.currentSummary(slips, reimbursements)
+        if (livePersonal.usedCents > 0L && livePersonal.outstandingCents == 0L) {
+            runCatching {
+                personalArchiveStore.closeIfSettled(slips, reimbursements) { settlementSlips, settlementReimbursements ->
+                    PdfExporter.officePack(
+                        context,
+                        "Own money settlement",
+                        emptyList(),
+                        settlementSlips,
+                        emptyList(),
+                        settlementReimbursements
+                    )
+                }
+            }.onSuccess { archived ->
+                if (archived != null) {
+                    personalArchiveRevision++
+                    Toast.makeText(context, "Own-money report settled and moved to Archive", Toast.LENGTH_LONG).show()
+                }
+            }.onFailure { error ->
+                Toast.makeText(context, "Could not archive settled own-money report: ${error.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     BackHandler {
         if (screen != Screen.HOME) {
             editingSlip = null
@@ -290,6 +331,7 @@ fun SlipApp(repository: SlipRepository) {
                     repository = repository,
                     advances = advances,
                     slips = slips,
+                    personalSummary = personalSummary,
                     onAdvances = { screen = Screen.ADVANCES },
                     onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
                     onScan = ::startScan
@@ -299,8 +341,8 @@ fun SlipApp(repository: SlipRepository) {
                     slips = slips,
                     onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
                 )
-                Screen.REPORTS -> ReportsScreen(repository, advances, slips, returns, reimbursements)
-                Screen.ARCHIVE -> ArchiveScreen(repository, advances, slips, returns)
+                Screen.REPORTS -> ReportsScreen(advances, slips, returns, reimbursements, personalArchiveStore)
+                Screen.ARCHIVE -> ArchiveScreen(repository, advances, slips, returns, reimbursements, personalArchiveStore, personalArchiveRevision)
                 Screen.SETTINGS -> SettingsScreen(repository, advances, slips, returns, reimbursements)
                 Screen.EDIT_SLIP -> editingSlip?.let { original ->
                     EditSlipScreen(
@@ -413,6 +455,7 @@ private fun HomeScreen(
     repository: SlipRepository,
     advances: List<Advance>,
     slips: List<Slip>,
+    personalSummary: PersonalFundsSummary,
     onAdvances: () -> Unit,
     onSlip: (Slip) -> Unit,
     onScan: () -> Unit
@@ -428,7 +471,7 @@ private fun HomeScreen(
     val selectedAdvance = dashboardAdvances.firstOrNull { it.id == selectedAdvanceId }
     val rec = selectedAdvanceId?.let { repository.reconciliation(it) } ?: repository.activeReconciliation()
     val activeRec = repository.activeReconciliation()
-    val personal = repository.personalFundsSummary()
+    val personal = personalSummary
     var showReimbursement by remember { mutableStateOf(false) }
     val activeAdvanceIds = advances.asSequence().filterNot { it.archived }.map { it.id }.toSet()
     val visibleSlips = when {
@@ -809,8 +852,13 @@ private fun ArchiveScreen(
     repository: SlipRepository,
     advances: List<Advance>,
     slips: List<Slip>,
-    returns: List<MoneyReturn>
+    returns: List<MoneyReturn>,
+    reimbursements: List<Reimbursement>,
+    personalArchiveStore: PersonalReportArchiveStore,
+    archiveRevision: Long
 ) {
+    val context = LocalContext.current
+    val personalArchives = remember(slips, reimbursements, archiveRevision) { personalArchiveStore.entries() }
     val archivedAdvances = advances.filter { it.archived }.sortedWith(
         compareByDescending<Advance> { it.archivedAtMillis ?: 0L }.thenByDescending { it.dateEpochDay }
     )
@@ -823,16 +871,54 @@ private fun ArchiveScreen(
     ) {
         item {
             InfoCard(
-                "Archived advances",
-                "Settled advances are removed from Home. Archived advances with an outstanding balance remain on Home until they reach R0.00."
+                "Completed reports",
+                "Settled advances and fully reimbursed own-money reports move here automatically. Use Share report whenever you need to resend a completed Office Pack."
             )
         }
-        if (archivedAdvances.isEmpty()) {
-            item { InfoCard("Archive is empty", "Archive an advance after its report has been sent.") }
-        } else {
+
+        if (personalArchives.isNotEmpty()) {
+            item { SectionTitle("Own-money settlements") }
+            items(personalArchives, key = { "personal_${it.id}" }) { archived ->
+                val closedDate = java.time.Instant.ofEpochMilli(archived.closedAtMillis)
+                    .atZone(java.time.ZoneId.systemDefault()).toLocalDate().format(displayDate)
+                Card {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Own money settlement", fontWeight = FontWeight.Bold)
+                        Text("Closed $closedDate")
+                        Text("Used ${money(archived.usedCents)}")
+                        Text("Reimbursed ${money(archived.reimbursedCents)}")
+                        Text("SETTLED • R0.00", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    val saved = personalArchiveStore.reportFile(archived)
+                                    val report = if (saved.exists()) saved else {
+                                        PdfExporter.officePack(
+                                            context,
+                                            "Own money settlement",
+                                            emptyList(),
+                                            personalArchiveStore.slipsFor(archived, slips),
+                                            emptyList(),
+                                            personalArchiveStore.reimbursementsFor(archived, reimbursements)
+                                        )
+                                    }
+                                    shareFile(context, report, "application/pdf", "ECI Own Money Settlement")
+                                }.onFailure { Toast.makeText(context, "Could not share archived report: ${it.message}", Toast.LENGTH_LONG).show() }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Share report") }
+                    }
+                }
+            }
+        }
+
+        if (archivedAdvances.isNotEmpty()) {
+            item { SectionTitle("Archived advances") }
             items(archivedAdvances, key = { it.id }) { advance ->
-                val spent = slips.filter { it.advanceId == advance.id }.sumOf { it.companyPaidCents }
-                val returned = returns.filter { it.advanceId == advance.id }.sumOf { it.amountCents }
+                val advanceSlips = slips.filter { it.advanceId == advance.id }
+                val advanceReturns = returns.filter { it.advanceId == advance.id }
+                val spent = advanceSlips.sumOf { it.companyPaidCents }
+                val returned = advanceReturns.sumOf { it.amountCents }
                 val balance = advance.amountCents - spent - returned
                 Card {
                     Column(Modifier.fillMaxWidth().padding(14.dp)) {
@@ -846,13 +932,31 @@ private fun ArchiveScreen(
                             fontWeight = FontWeight.Bold,
                             color = if (balance == 0L) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                         )
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            TextButton(onClick = { returnAdvance = advance }) { Text("Return money") }
-                            TextButton(onClick = { repository.archiveAdvance(advance, false) }) { Text("Restore active") }
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    val label = advance.project.ifBlank { "Advance #${advance.id}" }
+                                    val report = PdfExporter.officePack(
+                                        context, label, listOf(advance), advanceSlips, advanceReturns, emptyList()
+                                    )
+                                    shareFile(context, report, "application/pdf", "ECI Office Pack")
+                                }.onFailure { Toast.makeText(context, "Could not share archived report: ${it.message}", Toast.LENGTH_LONG).show() }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Share report") }
+                        if (balance != 0L) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                TextButton(onClick = { returnAdvance = advance }) { Text("Return money") }
+                                TextButton(onClick = { repository.archiveAdvance(advance, false) }) { Text("Restore active") }
+                            }
                         }
                     }
                 }
             }
+        }
+
+        if (personalArchives.isEmpty() && archivedAdvances.isEmpty()) {
+            item { InfoCard("Archive is empty", "A completed report will appear here automatically when its balance reaches R0.00.") }
         }
     }
 
@@ -1054,33 +1158,65 @@ private fun AdvancePicker(advances: List<Advance>, selectedId: Long?, onSelected
 }
 
 @Composable
-private fun ReportsScreen(repository: SlipRepository, advances: List<Advance>, slips: List<Slip>, returns: List<MoneyReturn>, reimbursements: List<Reimbursement>) {
+private fun ReportsScreen(
+    advances: List<Advance>,
+    slips: List<Slip>,
+    returns: List<MoneyReturn>,
+    reimbursements: List<Reimbursement>,
+    personalArchiveStore: PersonalReportArchiveStore
+) {
     val context = LocalContext.current
+    val activeAdvances = advances.filterNot { it.archived }
+    val activeAdvanceIds = activeAdvances.map { it.id }.toSet()
+    val personalSlipFloor = personalArchiveStore.latestSlipId()
+    val personalReimbursementFloor = personalArchiveStore.latestReimbursementId()
     var selectedAdvanceId by remember { mutableStateOf<Long?>(null) }
-    val selectedAdvances = advances.filter { selectedAdvanceId == null || it.id == selectedAdvanceId }
-    val selectedSlips = slips.filter { selectedAdvanceId == null || it.advanceId == selectedAdvanceId }
-    val selectedReturns = returns.filter { selectedAdvanceId == null || it.advanceId == selectedAdvanceId }
-    val selectedReimbursements = if (selectedAdvanceId == null) reimbursements else emptyList()
-    val rec = repository.reconciliation(selectedAdvanceId)
+
+    LaunchedEffect(activeAdvances) {
+        if (selectedAdvanceId != null && activeAdvances.none { it.id == selectedAdvanceId }) selectedAdvanceId = null
+    }
+
+    val selectedAdvances = activeAdvances.filter { selectedAdvanceId == null || it.id == selectedAdvanceId }
+    val selectedSlips = if (selectedAdvanceId == null) {
+        slips.filter { slip ->
+            val activeCompanySlip = slip.advanceId != null && slip.advanceId in activeAdvanceIds
+            val currentOwnMoneySlip = slip.advanceId == null && slip.ownMoneyCents > 0L && slip.id > personalSlipFloor
+            activeCompanySlip || currentOwnMoneySlip
+        }
+    } else {
+        slips.filter { it.advanceId == selectedAdvanceId }
+    }
+    val selectedReturns = returns.filter {
+        if (selectedAdvanceId == null) it.advanceId in activeAdvanceIds else it.advanceId == selectedAdvanceId
+    }
+    val selectedReimbursements = if (selectedAdvanceId == null) {
+        reimbursements.filter { it.id > personalReimbursementFloor }
+    } else emptyList()
+
+    val selectedAdvanceIds = selectedAdvances.map { it.id }.toSet()
+    val receivedCents = selectedAdvances.sumOf { it.amountCents }
+    val companySlipCents = selectedSlips.filter { it.advanceId != null && it.advanceId in selectedAdvanceIds }.sumOf { it.companyPaidCents }
+    val returnedCents = selectedReturns.sumOf { it.amountCents }
+    val outstandingCents = receivedCents - companySlipCents - returnedCents
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        AdvancePicker(advances, selectedAdvanceId, { selectedAdvanceId = it })
+        AdvancePicker(activeAdvances, selectedAdvanceId, { selectedAdvanceId = it })
         Card {
             Column(Modifier.fillMaxWidth().padding(14.dp)) {
                 Text("Reconciliation", fontWeight = FontWeight.Bold)
-                Text("Received ${money(rec.receivedCents)}")
-                Text("Slips ${money(rec.slipsCents)}")
-                Text("Returned ${money(rec.returnedCents)}")
-                Text("Outstanding ${money(rec.outstandingCents)}", fontWeight = FontWeight.Bold)
+                Text("Received ${money(receivedCents)}")
+                Text("Slips ${money(companySlipCents)}")
+                Text("Returned ${money(returnedCents)}")
+                Text("Outstanding ${money(outstandingCents)}", fontWeight = FontWeight.Bold)
             }
         }
         if (selectedSlips.isEmpty()) {
-            InfoCard("Nothing to export", "Capture at least one slip before creating PDFs.")
+            InfoCard("Nothing to export", "Capture a current slip before creating PDFs. Completed reports are available from Archive.")
         } else {
             Button(
                 onClick = {
                     runCatching {
-                        val label = selectedAdvanceId?.let { id -> advances.firstOrNull { it.id == id }?.project?.ifBlank { "Advance #$id" } } ?: "All advances"
+                        val label = selectedAdvanceId?.let { id -> activeAdvances.firstOrNull { it.id == id }?.project?.ifBlank { "Advance #$id" } } ?: "Current report"
                         val file = PdfExporter.officePack(context, label, selectedAdvances, selectedSlips, selectedReturns, selectedReimbursements)
                         shareFile(context, file, "application/pdf", "ECI Office Pack")
                     }.onFailure { Toast.makeText(context, "Could not create Office Pack: ${it.message}", Toast.LENGTH_LONG).show() }
@@ -1233,7 +1369,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         }
 
         Spacer(Modifier.height(12.dp))
-        InfoCard("Storage", "Version 0.7.2 stores the database, original receipt images and report branding privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
+        InfoCard("Storage", "Version 0.7.4 stores the database, receipt images, completed report archive and report branding privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
     }
 
     restoreFile?.let { file ->
@@ -1292,6 +1428,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                         Toast.makeText(context, "Select at least one item to clear.", Toast.LENGTH_SHORT).show()
                     } else {
                         repository.clearSelectedData(clearActive, clearArchived, clearSlips, clearReturns, clearOwnMoney, clearReimbursements)
+                        if (clearSlips || clearOwnMoney || clearReimbursements) PersonalReportArchiveStore(context).clear()
                         if (clearSettings) {
                             prefs.edit().clear().apply()
                             runCatching { if (logoPath.isNotBlank()) File(logoPath).delete() }
