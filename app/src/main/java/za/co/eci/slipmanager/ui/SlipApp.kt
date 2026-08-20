@@ -10,6 +10,7 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -81,6 +82,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import za.co.eci.slipmanager.backup.BackupManager
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.MoneyReturn
@@ -90,6 +94,7 @@ import za.co.eci.slipmanager.data.Slip
 import za.co.eci.slipmanager.data.SlipRepository
 import za.co.eci.slipmanager.ocr.ReceiptGuess
 import za.co.eci.slipmanager.ocr.ReceiptOcr
+import za.co.eci.slipmanager.ocr.ReceiptScanProcessor
 import za.co.eci.slipmanager.pdf.PdfExporter
 import java.io.File
 import java.text.NumberFormat
@@ -122,13 +127,7 @@ fun SlipApp(repository: SlipRepository) {
         return File(dir, "receipt_${System.currentTimeMillis()}.jpg")
     }
 
-    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val file = pendingImageFile
-        if (!success || file == null) {
-            if (file != null) file.delete()
-            pendingImageFile = null
-            return@rememberLauncherForActivityResult
-        }
+    fun openReceiptReview(file: File) {
         processingOcr = true
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
         ReceiptOcr.recognize(context, uri) { result ->
@@ -147,9 +146,42 @@ fun SlipApp(repository: SlipRepository) {
                 imagePath = file.absolutePath,
                 ocrText = guess.rawText
             )
-            pendingImageFile = null
             screen = Screen.EDIT_SLIP
         }
+    }
+
+    fun prepareBlackWhiteReceipt(sourceUri: Uri, originalCameraFile: File? = null) {
+        processingOcr = true
+        val cleanedFile = makeReceiptFile()
+        Thread {
+            val prepared = runCatching {
+                ReceiptScanProcessor.saveBlackWhite(context, sourceUri, cleanedFile)
+            }
+            activity.runOnUiThread {
+                prepared.onSuccess { file ->
+                    if (originalCameraFile != null && originalCameraFile.absolutePath != file.absolutePath) {
+                        originalCameraFile.delete()
+                    }
+                    openReceiptReview(file)
+                }.onFailure { error ->
+                    processingOcr = false
+                    cleanedFile.delete()
+                    originalCameraFile?.delete()
+                    Toast.makeText(context, "Could not clean the receipt scan: ${error.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val file = pendingImageFile
+        pendingImageFile = null
+        if (!success || file == null) {
+            file?.delete()
+            return@rememberLauncherForActivityResult
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        prepareBlackWhiteReceipt(uri, originalCameraFile = file)
     }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -159,11 +191,11 @@ fun SlipApp(repository: SlipRepository) {
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
             cameraLauncher.launch(uri)
         } else {
-            Toast.makeText(context, "Camera permission is needed to scan slips.", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Camera permission is needed for the fallback camera.", Toast.LENGTH_LONG).show()
         }
     }
 
-    fun startScan() {
+    fun startFallbackCamera() {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             val file = makeReceiptFile()
             pendingImageFile = file
@@ -172,6 +204,39 @@ fun SlipApp(repository: SlipRepository) {
         } else {
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    val scannerOptions = remember {
+        GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(false)
+            .setPageLimit(1)
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+    }
+    val documentScanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
+
+    val documentScannerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { activityResult ->
+        if (activityResult.resultCode == Activity.RESULT_OK) {
+            val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(activityResult.data)
+            val imageUri = scanResult?.pages?.firstOrNull()?.imageUri
+            if (imageUri != null) {
+                prepareBlackWhiteReceipt(imageUri)
+            } else {
+                Toast.makeText(context, "The scanner did not return a receipt image.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun startScan() {
+        documentScanner.getStartScanIntent(activity)
+            .addOnSuccessListener { intentSender ->
+                documentScannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+            }
+            .addOnFailureListener {
+                Toast.makeText(context, "Document scanner unavailable. Opening the normal camera instead.", Toast.LENGTH_LONG).show()
+                startFallbackCamera()
+            }
     }
 
     BackHandler {
