@@ -18,8 +18,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "0.7.2"
+        versionCode = 13
+        versionName = "0.7.3"
     }
 
     signingConfigs {
@@ -86,4 +86,5 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
 }
