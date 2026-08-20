@@ -85,6 +85,9 @@ import androidx.core.content.FileProvider
 import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScanningResult
+import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.android.gms.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import za.co.eci.slipmanager.backup.BackupManager
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.MoneyReturn
@@ -94,6 +97,7 @@ import za.co.eci.slipmanager.data.Slip
 import za.co.eci.slipmanager.data.SlipRepository
 import za.co.eci.slipmanager.ocr.ReceiptGuess
 import za.co.eci.slipmanager.ocr.ReceiptOcr
+import za.co.eci.slipmanager.ocr.ReceiptScanProcessor
 import za.co.eci.slipmanager.ocr.ReceiptScanProcessor
 import za.co.eci.slipmanager.pdf.PdfExporter
 import java.io.File
