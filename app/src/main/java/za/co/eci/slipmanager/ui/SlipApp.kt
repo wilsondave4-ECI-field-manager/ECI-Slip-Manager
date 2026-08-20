@@ -1049,6 +1049,12 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
     val prefs = remember { context.getSharedPreferences("settings", 0) }
     var name by remember { mutableStateOf(prefs.getString("name", "Dave") ?: "Dave") }
     var company by remember { mutableStateOf(prefs.getString("company", "ECI Automation") ?: "ECI Automation") }
+    var companyRegistration by remember { mutableStateOf(prefs.getString("company_registration", "") ?: "") }
+    var companyVat by remember { mutableStateOf(prefs.getString("company_vat", "") ?: "") }
+    var companyPhone by remember { mutableStateOf(prefs.getString("company_phone", "") ?: "") }
+    var companyEmail by remember { mutableStateOf(prefs.getString("company_email", "") ?: "") }
+    var companyAddress by remember { mutableStateOf(prefs.getString("company_address", "") ?: "") }
+    var logoPath by remember { mutableStateOf(prefs.getString("company_logo_path", "") ?: "") }
     var officeEmail by remember { mutableStateOf(prefs.getString("office_email", "") ?: "") }
     var dextEmail by remember { mutableStateOf(prefs.getString("dext_email", "") ?: "") }
     var restoreFile by remember { mutableStateOf<File?>(null) }
@@ -1072,15 +1078,77 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         }
     }
 
+
+    val logoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                val dir = File(context.filesDir, "branding").apply { mkdirs() }
+                val target = File(dir, "company_logo")
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                } ?: error("Could not read selected logo")
+                logoPath = target.absolutePath
+            }.onFailure { Toast.makeText(context, "Could not save logo: ${it.message}", Toast.LENGTH_LONG).show() }
+        }
+    }
+    val logoBitmap = remember(logoPath) {
+        logoPath.takeIf { it.isNotBlank() && File(it).exists() }?.let(BitmapFactory::decodeFile)
+    }
+
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        SectionTitle("Your details")
-        TextFieldSimple("Name", name, { name = it })
-        TextFieldSimple("Company", company, { company = it })
+        SectionTitle("Report identity")
+        Text("These details appear on the accountant Office Pack.", style = MaterialTheme.typography.bodySmall)
+        TextFieldSimple("User / Submitted by *", name, { name = it })
+
+        Spacer(Modifier.height(6.dp)); SectionTitle("Company details")
+        TextFieldSimple("Company name", company, { company = it })
+        TextFieldSimple("Company registration number", companyRegistration, { companyRegistration = it })
+        TextFieldSimple("Company VAT number", companyVat, { companyVat = it })
+        TextFieldSimple("Company phone", companyPhone, { companyPhone = it })
+        TextFieldSimple("Company email", companyEmail, { companyEmail = it })
+        TextFieldSimple("Company address", companyAddress, { companyAddress = it })
+
+        Spacer(Modifier.height(6.dp)); SectionTitle("Report branding")
+        if (logoBitmap != null) {
+            Card {
+                Image(
+                    bitmap = logoBitmap.asImageBitmap(),
+                    contentDescription = "Company logo",
+                    modifier = Modifier.fillMaxWidth().height(90.dp).padding(10.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
+            Text("Company logo selected", style = MaterialTheme.typography.bodySmall)
+        } else {
+            Text("No company logo selected. The report will use a clean text ECI Automation header.", style = MaterialTheme.typography.bodySmall)
+        }
+        OutlinedButton(onClick = { logoPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) {
+            Text(if (logoBitmap == null) "Choose company logo" else "Change company logo")
+        }
+        if (logoPath.isNotBlank()) {
+            TextButton(onClick = {
+                runCatching { File(logoPath).delete() }
+                logoPath = ""
+            }, modifier = Modifier.fillMaxWidth()) { Text("Remove company logo") }
+        }
+
+        Spacer(Modifier.height(6.dp)); SectionTitle("Email handoff")
         TextFieldSimple("Office email", officeEmail, { officeEmail = it })
         TextFieldSimple("Dext email", dextEmail, { dextEmail = it })
         Button(onClick = {
-            prefs.edit().putString("name", name).putString("company", company).putString("office_email", officeEmail).putString("dext_email", dextEmail).apply()
-            Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
+            prefs.edit()
+                .putString("name", name.trim())
+                .putString("company", company.trim())
+                .putString("company_registration", companyRegistration.trim())
+                .putString("company_vat", companyVat.trim())
+                .putString("company_phone", companyPhone.trim())
+                .putString("company_email", companyEmail.trim())
+                .putString("company_address", companyAddress.trim())
+                .putString("company_logo_path", logoPath)
+                .putString("office_email", officeEmail.trim())
+                .putString("dext_email", dextEmail.trim())
+                .apply()
+            Toast.makeText(context, "Report and email settings saved", Toast.LENGTH_SHORT).show()
         }, modifier = Modifier.fillMaxWidth()) { Text("Save settings") }
 
         Spacer(Modifier.height(10.dp)); SectionTitle("Backup & restore")
@@ -1100,7 +1168,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         }
 
         Spacer(Modifier.height(12.dp))
-        InfoCard("Storage", "Version 0.6 stores the database and original receipt images privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
+        InfoCard("Storage", "Version 0.7.2 stores the database, original receipt images and report branding privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
     }
 
     restoreFile?.let { file ->
@@ -1149,7 +1217,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                     Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearReturns, { clearReturns = it }); Text("Money returned records (${returns.size})") }
                     Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearOwnMoney, { clearOwnMoney = it }); Text("Own-money allocations (${slips.count { it.ownMoneyCents > 0L || it.paymentType != PaymentType.ADVANCE }}) — keeps slips") }
                     Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearReimbursements, { clearReimbursements = it }); Text("Reimbursement records (${reimbursements.size})") }
-                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearSettings, { clearSettings = it }); Text("Name, company and email settings") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearSettings, { clearSettings = it }); Text("Report identity, company details, logo and email settings") }
                 }
             },
             confirmButton = {
@@ -1161,7 +1229,10 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                         repository.clearSelectedData(clearActive, clearArchived, clearSlips, clearReturns, clearOwnMoney, clearReimbursements)
                         if (clearSettings) {
                             prefs.edit().clear().apply()
-                            name = "Dave"; company = "ECI Automation"; officeEmail = ""; dextEmail = ""
+                            runCatching { if (logoPath.isNotBlank()) File(logoPath).delete() }
+                            name = "Dave"; company = "ECI Automation"; companyRegistration = ""; companyVat = ""
+                            companyPhone = ""; companyEmail = ""; companyAddress = ""; logoPath = ""
+                            officeEmail = ""; dextEmail = ""
                         }
                         Toast.makeText(context, "Selected data cleared", Toast.LENGTH_LONG).show()
                         showClearDialog = false
