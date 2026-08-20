@@ -39,10 +39,12 @@ object PdfExporter {
         advances: List<Advance>,
         slips: List<Slip>,
         returns: List<MoneyReturn>,
-        reimbursements: List<Reimbursement> = emptyList()
+        reimbursements: List<Reimbursement> = emptyList(),
+        documentNumber: String? = null
     ): File {
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, "ECI_Office_Pack_${System.currentTimeMillis()}.pdf")
+        val safeDocument = documentNumber?.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val file = File(dir, if (safeDocument.isNullOrBlank()) "ECI_Office_Pack_${System.currentTimeMillis()}.pdf" else "${safeDocument}_Office_Pack.pdf")
         val doc = PdfDocument()
 
         val identity = loadIdentity(context)
@@ -55,14 +57,14 @@ object PdfExporter {
         val body = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 10f }
         val bodySmall = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 9f }
         val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = 1f; color = Color.rgb(205, 205, 205) }
-        var y = drawProfessionalHeader(page.canvas, identity, logo, title, generated, currentPageNo)
+        var y = drawProfessionalHeader(page.canvas, identity, logo, title, generated, currentPageNo, documentNumber)
 
         fun newTextPage() {
             drawFooter(page.canvas, identity, currentPageNo)
             doc.finishPage(page)
             currentPageNo = nextPageNo++
             page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, currentPageNo).create())
-            y = drawProfessionalHeader(page.canvas, identity, logo, title, generated, currentPageNo)
+            y = drawProfessionalHeader(page.canvas, identity, logo, title, generated, currentPageNo, documentNumber)
         }
 
         drawSectionHeader(page.canvas, "RECONCILIATION", y); y += 25f
@@ -88,6 +90,12 @@ object PdfExporter {
             "Number of slips: ${slips.size}"
         ).forEach {
             canvasOf(page).drawText(it, 36f, y, body)
+            y += 18f
+        }
+        if (advances.isNotEmpty() && outstanding == 0L && personalUsed > 0L) {
+            canvasOf(page).drawText("Personal funds transferred for reimbursement: ${fmt(personalUsed)}", 36f, y, sub)
+            y += 16f
+            canvasOf(page).drawText("The personal-funded portion is carried forward in the open Personal Funds settlement.", 36f, y, bodySmall)
             y += 18f
         }
 
@@ -189,7 +197,7 @@ object PdfExporter {
             val bitmap = loadReceiptForPdf(slip.imagePath) ?: return@forEachIndexed
             val receiptPageNo = nextPageNo++
             val receiptPage = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_W, PAGE_H, receiptPageNo).create())
-            drawProfessionalReceiptPage(receiptPage.canvas, bitmap, slip, identity, logo, title, generated, receiptPageNo, index + 1, slips.size)
+            drawProfessionalReceiptPage(receiptPage.canvas, bitmap, slip, identity, logo, title, generated, receiptPageNo, index + 1, slips.size, documentNumber)
             doc.finishPage(receiptPage)
             bitmap.recycle()
         }
@@ -278,7 +286,8 @@ object PdfExporter {
         logo: Bitmap?,
         reportLabel: String,
         generated: String,
-        pageNumber: Int
+        pageNumber: Int,
+        documentNumber: String?
     ): Float {
         val yellow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 193, 7) }
         val strong = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(32, 32, 32); textSize = 15f; isFakeBoldText = true }
@@ -311,6 +320,7 @@ object PdfExporter {
         canvas.drawText("EXPENSE & ADVANCE REPORT", 36f, 108f, strong)
         drawRightText(canvas, "Page $pageNumber", PAGE_W - 36f, 108f, meta)
         canvas.drawText("Report: ${shorten(reportLabel, 58)}", 36f, 126f, meta)
+        if (!documentNumber.isNullOrBlank()) drawRightText(canvas, "Document: $documentNumber", PAGE_W - 36f, 126f, meta)
         canvas.drawText("Submitted by: ${shorten(identity.submittedBy, 42)}", 36f, 140f, meta)
         drawRightText(canvas, "Generated: $generated", PAGE_W - 36f, 140f, meta)
         canvas.drawLine(36f, 150f, PAGE_W - 36f, 150f, divider)
@@ -344,7 +354,8 @@ object PdfExporter {
         generated: String,
         pageNumber: Int,
         receiptIndex: Int,
-        receiptCount: Int
+        receiptCount: Int,
+        documentNumber: String?
     ) {
         val yellow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 193, 7) }
         val head = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(32, 32, 32); textSize = 11f; isFakeBoldText = true }
@@ -356,6 +367,7 @@ object PdfExporter {
         else canvas.drawText(identity.company.uppercase(Locale.getDefault()), 36f, 39f, head)
         drawRightText(canvas, "EXPENSE & ADVANCE REPORT", PAGE_W - 36f, 27f, head)
         drawRightText(canvas, "Receipt $receiptIndex of $receiptCount | Page $pageNumber", PAGE_W - 36f, 42f, small)
+        if (!documentNumber.isNullOrBlank()) drawRightText(canvas, "Document $documentNumber", PAGE_W - 36f, 54f, small)
         canvas.drawLine(36f, 64f, PAGE_W - 36f, 64f, divider)
 
         val date = slip.dateEpochDay?.let { LocalDate.ofEpochDay(it).format(dateFmt) } ?: "Date missing"
@@ -366,10 +378,16 @@ object PdfExporter {
         canvas.drawText(shorten(slip.supplier.ifBlank { "Supplier missing" }, 62), 36f, 86f, head)
         canvas.drawText("$date | ${shorten(reportLabel, 50)}", 36f, 100f, small)
         canvas.drawText("Ex VAT $exVatText | VAT $vatText | Total ${fmt(slip.totalCents)}", 36f, 116f, body)
+        val funding = when (slip.paymentType) {
+            PaymentType.ADVANCE -> "Company advance ${fmt(slip.companyPaidCents)}"
+            PaymentType.OWN -> "Personal funds ${fmt(slip.ownMoneyCents)}"
+            PaymentType.SPLIT -> "Company ${fmt(slip.companyPaidCents)} + Personal ${fmt(slip.ownMoneyCents)}"
+        }
+        canvas.drawText("Funding: $funding", 36f, 131f, body)
         drawRightText(canvas, "Generated $generated", PAGE_W - 36f, 100f, small)
-        canvas.drawLine(36f, 126f, PAGE_W - 36f, 126f, divider)
+        canvas.drawLine(36f, 141f, PAGE_W - 36f, 141f, divider)
 
-        val top = 140f
+        val top = 154f
         val bottom = 797f
         val maxW = PAGE_W - 48f
         val maxH = bottom - top

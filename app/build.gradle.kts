@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// v0.7.3 B&W document scanner final verification
+// v0.7.5 advance rollover, permanent reports and document numbering
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +19,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.7.4"
+        versionCode = 15
+        versionName = "0.7.5"
     }
 
     signingConfigs {

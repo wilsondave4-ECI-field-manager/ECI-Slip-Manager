@@ -87,6 +87,8 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import za.co.eci.slipmanager.backup.BackupManager
 import za.co.eci.slipmanager.data.Advance
+import za.co.eci.slipmanager.data.AdvanceReportArchiveStore
+import za.co.eci.slipmanager.data.DocumentNumberStore
 import za.co.eci.slipmanager.data.MoneyReturn
 import za.co.eci.slipmanager.data.PaymentType
 import za.co.eci.slipmanager.data.PersonalFundsSummary
@@ -116,6 +118,8 @@ fun SlipApp(repository: SlipRepository) {
     val returns by repository.returns.collectAsState()
     val reimbursements by repository.reimbursements.collectAsState()
     val personalArchiveStore = remember { PersonalReportArchiveStore(context) }
+    val advanceArchiveStore = remember { AdvanceReportArchiveStore(context) }
+    val documentNumberStore = remember { DocumentNumberStore(context) }
     var personalArchiveRevision by remember { mutableLongStateOf(0L) }
     val personalSummary = remember(slips, reimbursements, personalArchiveRevision) {
         personalArchiveStore.currentSummary(slips, reimbursements)
@@ -247,10 +251,72 @@ fun SlipApp(repository: SlipRepository) {
     }
 
     LaunchedEffect(advances, slips, returns) {
+        // Close active advances only after the exact company-funded balance reaches zero.
         advances.filterNot { it.archived }.forEach { advance ->
-            val hasActivity = slips.any { it.advanceId == advance.id } || returns.any { it.advanceId == advance.id }
-            if (hasActivity && repository.reconciliation(advance.id).outstandingCents == 0L) {
-                repository.archiveAdvance(advance, true)
+            val advanceSlips = slips.filter { it.advanceId == advance.id }
+            val advanceReturns = returns.filter { it.advanceId == advance.id }
+            val hasActivity = advanceSlips.isNotEmpty() || advanceReturns.isNotEmpty()
+            val balance = advance.amountCents - advanceSlips.sumOf { it.companyPaidCents } - advanceReturns.sumOf { it.amountCents }
+            if (hasActivity && balance == 0L) {
+                val previous = advanceArchiveStore.forAdvance(advance.id)
+                val archivedEntry = previous ?: runCatching {
+                    val documentNumber = documentNumberStore.nextNumber()
+                    advanceArchiveStore.archiveSettled(
+                        advance = advance,
+                        slips = slips,
+                        returns = returns,
+                        documentNumber = documentNumber
+                    ) { reportSlips, reportReturns, number ->
+                        PdfExporter.officePack(
+                            context = context,
+                            title = advance.project.ifBlank { "Advance #${advance.id}" },
+                            advances = listOf(advance),
+                            slips = reportSlips,
+                            returns = reportReturns,
+                            reimbursements = emptyList(),
+                            documentNumber = number
+                        )
+                    }
+                }.getOrElse { error ->
+                    Toast.makeText(context, "Could not save completed advance report: ${error.message}", Toast.LENGTH_LONG).show()
+                    null
+                }
+
+                if (archivedEntry != null) {
+                    repository.archiveAdvance(advance, true)
+                    personalArchiveRevision++
+                    if (previous == null) {
+                        Toast.makeText(context, "Advance settled and archived as ${archivedEntry.documentNumber}", Toast.LENGTH_LONG).show()
+                        launchPreparedReportEmail(
+                            context,
+                            advanceArchiveStore.reportFile(archivedEntry),
+                            archivedEntry.documentNumber,
+                            "ECI Advance Report"
+                        )
+                    }
+                }
+            }
+        }
+
+        // v0.7.4 already archived some settled advances before permanent PDF
+        // snapshots existed. Create snapshots for those once, but do not pop an
+        // email composer for historical/migrated reports.
+        advances.filter { it.archived }.forEach { advance ->
+            if (advanceArchiveStore.forAdvance(advance.id) == null) {
+                val advanceSlips = slips.filter { it.advanceId == advance.id }
+                val advanceReturns = returns.filter { it.advanceId == advance.id }
+                val balance = advance.amountCents - advanceSlips.sumOf { it.companyPaidCents } - advanceReturns.sumOf { it.amountCents }
+                if ((advanceSlips.isNotEmpty() || advanceReturns.isNotEmpty()) && balance == 0L) {
+                    runCatching {
+                        val documentNumber = documentNumberStore.nextNumber()
+                        advanceArchiveStore.archiveSettled(advance, slips, returns, documentNumber) { reportSlips, reportReturns, number ->
+                            PdfExporter.officePack(
+                                context, advance.project.ifBlank { "Advance #${advance.id}" },
+                                listOf(advance), reportSlips, reportReturns, emptyList(), number
+                            )
+                        }
+                    }.onSuccess { if (it != null) personalArchiveRevision++ }
+                }
             }
         }
     }
@@ -259,23 +325,31 @@ fun SlipApp(repository: SlipRepository) {
         val livePersonal = personalArchiveStore.currentSummary(slips, reimbursements)
         if (livePersonal.usedCents > 0L && livePersonal.outstandingCents == 0L) {
             runCatching {
-                personalArchiveStore.closeIfSettled(slips, reimbursements) { settlementSlips, settlementReimbursements ->
+                val documentNumber = documentNumberStore.nextNumber()
+                personalArchiveStore.closeIfSettled(slips, reimbursements, documentNumber) { settlementSlips, settlementReimbursements, number ->
                     PdfExporter.officePack(
-                        context,
-                        "Own money settlement",
-                        emptyList(),
-                        settlementSlips,
-                        emptyList(),
-                        settlementReimbursements
+                        context = context,
+                        title = "Personal funds settlement",
+                        advances = emptyList(),
+                        slips = settlementSlips,
+                        returns = emptyList(),
+                        reimbursements = settlementReimbursements,
+                        documentNumber = number
                     )
                 }
             }.onSuccess { archived ->
                 if (archived != null) {
                     personalArchiveRevision++
-                    Toast.makeText(context, "Own-money report settled and moved to Archive", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Personal funds settled and archived as ${archived.documentNumber}", Toast.LENGTH_LONG).show()
+                    launchPreparedReportEmail(
+                        context,
+                        personalArchiveStore.reportFile(archived),
+                        archived.documentNumber,
+                        "ECI Personal Funds Report"
+                    )
                 }
             }.onFailure { error ->
-                Toast.makeText(context, "Could not archive settled own-money report: ${error.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Could not archive settled personal-funds report: ${error.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -341,15 +415,49 @@ fun SlipApp(repository: SlipRepository) {
                     slips = slips,
                     onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
                 )
-                Screen.REPORTS -> ReportsScreen(advances, slips, returns, reimbursements, personalArchiveStore)
-                Screen.ARCHIVE -> ArchiveScreen(repository, advances, slips, returns, reimbursements, personalArchiveStore, personalArchiveRevision)
+                Screen.REPORTS -> ReportsScreen(advances, slips, returns, reimbursements, personalArchiveStore, documentNumberStore)
+                Screen.ARCHIVE -> ArchiveScreen(repository, advances, slips, returns, reimbursements, personalArchiveStore, advanceArchiveStore, documentNumberStore, personalArchiveRevision)
                 Screen.SETTINGS -> SettingsScreen(repository, advances, slips, returns, reimbursements)
                 Screen.EDIT_SLIP -> editingSlip?.let { original ->
                     EditSlipScreen(
                         original = original,
                         advances = advances.filter { !it.archived || repository.reconciliation(it.id).outstandingCents != 0L },
-                        onSave = {
-                            repository.saveSlip(it)
+                        onSave = { candidate ->
+                            var adjusted = candidate
+                            var movedToPersonal = 0L
+                            val advanceId = candidate.advanceId
+                            if (advanceId != null) {
+                                advances.firstOrNull { it.id == advanceId }?.let { advance ->
+                                    val otherSpent = slips.filter { it.advanceId == advanceId && it.id != candidate.id }
+                                        .sumOf { it.companyPaidCents }
+                                    val returned = returns.filter { it.advanceId == advanceId }.sumOf { it.amountCents }
+                                    val available = (advance.amountCents - otherSpent - returned).coerceAtLeast(0L)
+                                    if (candidate.companyPaidCents > available) {
+                                        val requiredOwn = (candidate.totalCents - available).coerceIn(0L, candidate.totalCents)
+                                        adjusted = if (available > 0L) {
+                                            candidate.copy(
+                                                paymentType = PaymentType.SPLIT,
+                                                ownMoneyCents = maxOf(candidate.ownMoneyCents, requiredOwn)
+                                            )
+                                        } else {
+                                            candidate.copy(
+                                                advanceId = null,
+                                                paymentType = PaymentType.OWN,
+                                                ownMoneyCents = candidate.totalCents
+                                            )
+                                        }
+                                        movedToPersonal = (adjusted.ownMoneyCents - candidate.ownMoneyCents).coerceAtLeast(0L)
+                                    }
+                                }
+                            }
+                            repository.saveSlip(adjusted)
+                            if (movedToPersonal > 0L) {
+                                Toast.makeText(
+                                    context,
+                                    "Advance exhausted. ${money(movedToPersonal)} moved to Personal Funds.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
                             editingSlip = null
                             screen = Screen.SLIPS
                         },
@@ -855,10 +963,13 @@ private fun ArchiveScreen(
     returns: List<MoneyReturn>,
     reimbursements: List<Reimbursement>,
     personalArchiveStore: PersonalReportArchiveStore,
+    advanceArchiveStore: AdvanceReportArchiveStore,
+    documentNumberStore: DocumentNumberStore,
     archiveRevision: Long
 ) {
     val context = LocalContext.current
     val personalArchives = remember(slips, reimbursements, archiveRevision) { personalArchiveStore.entries() }
+    val advanceArchives = remember(advances, slips, returns, archiveRevision) { advanceArchiveStore.entries() }
     val archivedAdvances = advances.filter { it.archived }.sortedWith(
         compareByDescending<Advance> { it.archivedAtMillis ?: 0L }.thenByDescending { it.dateEpochDay }
     )
@@ -872,18 +983,20 @@ private fun ArchiveScreen(
         item {
             InfoCard(
                 "Completed reports",
-                "Settled advances and fully reimbursed own-money reports move here automatically. Use Share report whenever you need to resend a completed Office Pack."
+                "Settled advances and fully reimbursed personal-funds reports move here automatically. Each completed Office Pack keeps its document number permanently."
             )
         }
 
         if (personalArchives.isNotEmpty()) {
-            item { SectionTitle("Own-money settlements") }
+            item { SectionTitle("Personal funds settlements") }
             items(personalArchives, key = { "personal_${it.id}" }) { archived ->
                 val closedDate = java.time.Instant.ofEpochMilli(archived.closedAtMillis)
                     .atZone(java.time.ZoneId.systemDefault()).toLocalDate().format(displayDate)
                 Card {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Own money settlement", fontWeight = FontWeight.Bold)
+                        Text("Personal funds settlement", fontWeight = FontWeight.Bold)
+                        if (archived.documentNumber.isNotBlank()) Text("Document ${archived.documentNumber}", fontWeight = FontWeight.Bold)
+                        else Text("Legacy report (created before document numbering)", style = MaterialTheme.typography.bodySmall)
                         Text("Closed $closedDate")
                         Text("Used ${money(archived.usedCents)}")
                         Text("Reimbursed ${money(archived.reimbursedCents)}")
@@ -893,16 +1006,14 @@ private fun ArchiveScreen(
                                 runCatching {
                                     val saved = personalArchiveStore.reportFile(archived)
                                     val report = if (saved.exists()) saved else {
+                                        val number = archived.documentNumber.ifBlank { documentNumberStore.nextNumber() }
                                         PdfExporter.officePack(
-                                            context,
-                                            "Own money settlement",
-                                            emptyList(),
-                                            personalArchiveStore.slipsFor(archived, slips),
-                                            emptyList(),
-                                            personalArchiveStore.reimbursementsFor(archived, reimbursements)
+                                            context, "Personal funds settlement", emptyList(),
+                                            personalArchiveStore.slipsFor(archived, slips), emptyList(),
+                                            personalArchiveStore.reimbursementsFor(archived, reimbursements), number
                                         )
                                     }
-                                    shareFile(context, report, "application/pdf", "ECI Own Money Settlement")
+                                    shareFile(context, report, "application/pdf", "ECI Personal Funds ${archived.documentNumber}".trim())
                                 }.onFailure { Toast.makeText(context, "Could not share archived report: ${it.message}", Toast.LENGTH_LONG).show() }
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -920,31 +1031,42 @@ private fun ArchiveScreen(
                 val spent = advanceSlips.sumOf { it.companyPaidCents }
                 val returned = advanceReturns.sumOf { it.amountCents }
                 val balance = advance.amountCents - spent - returned
+                val savedEntry = advanceArchives.firstOrNull { it.advanceId == advance.id }
                 Card {
-                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(advance.project.ifBlank { "Advance #${advance.id}" }, fontWeight = FontWeight.Bold)
+                        savedEntry?.documentNumber?.takeIf { it.isNotBlank() }?.let { Text("Document $it", fontWeight = FontWeight.Bold) }
                         Text("${dateText(advance.dateEpochDay)} • ${advance.reference.ifBlank { "No reference" }}")
-                        Spacer(Modifier.height(6.dp))
                         Text("Received ${money(advance.amountCents)}")
                         Text("Slips ${money(spent)} • Returned ${money(returned)}")
+                        if ((savedEntry?.personalTransferredCents ?: 0L) > 0L) {
+                            Text("Transferred to Personal Funds ${money(savedEntry!!.personalTransferredCents)}")
+                        }
                         Text(
                             if (balance == 0L) "SETTLED • R0.00" else "OUTSTANDING • ${money(balance)}",
                             fontWeight = FontWeight.Bold,
                             color = if (balance == 0L) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                         )
-                        OutlinedButton(
-                            onClick = {
-                                runCatching {
-                                    val label = advance.project.ifBlank { "Advance #${advance.id}" }
-                                    val report = PdfExporter.officePack(
-                                        context, label, listOf(advance), advanceSlips, advanceReturns, emptyList()
-                                    )
-                                    shareFile(context, report, "application/pdf", "ECI Office Pack")
-                                }.onFailure { Toast.makeText(context, "Could not share archived report: ${it.message}", Toast.LENGTH_LONG).show() }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("Share report") }
-                        if (balance != 0L) {
+                        if (balance == 0L) {
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        val existing = advanceArchiveStore.forAdvance(advance.id)
+                                        val entry = existing ?: run {
+                                            val number = documentNumberStore.nextNumber()
+                                            advanceArchiveStore.archiveSettled(advance, slips, returns, number) { reportSlips, reportReturns, docNo ->
+                                                PdfExporter.officePack(
+                                                    context, advance.project.ifBlank { "Advance #${advance.id}" },
+                                                    listOf(advance), reportSlips, reportReturns, emptyList(), docNo
+                                                )
+                                            } ?: error("Could not create archived advance report")
+                                        }
+                                        shareFile(context, advanceArchiveStore.reportFile(entry), "application/pdf", "ECI Advance ${entry.documentNumber}")
+                                    }.onFailure { Toast.makeText(context, "Could not share archived report: ${it.message}", Toast.LENGTH_LONG).show() }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Share report") }
+                        } else {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 TextButton(onClick = { returnAdvance = advance }) { Text("Return money") }
                                 TextButton(onClick = { repository.archiveAdvance(advance, false) }) { Text("Restore active") }
@@ -1163,7 +1285,8 @@ private fun ReportsScreen(
     slips: List<Slip>,
     returns: List<MoneyReturn>,
     reimbursements: List<Reimbursement>,
-    personalArchiveStore: PersonalReportArchiveStore
+    personalArchiveStore: PersonalReportArchiveStore,
+    documentNumberStore: DocumentNumberStore
 ) {
     val context = LocalContext.current
     val activeAdvances = advances.filterNot { it.archived }
@@ -1180,7 +1303,9 @@ private fun ReportsScreen(
     val selectedSlips = if (selectedAdvanceId == null) {
         slips.filter { slip ->
             val activeCompanySlip = slip.advanceId != null && slip.advanceId in activeAdvanceIds
-            val currentOwnMoneySlip = slip.advanceId == null && slip.ownMoneyCents > 0L && slip.id > personalSlipFloor
+            // A rollover split receipt stays attached to the closed advance, but
+            // its own-money portion must also remain in the live Personal Funds report.
+            val currentOwnMoneySlip = slip.ownMoneyCents > 0L && slip.id > personalSlipFloor
             activeCompanySlip || currentOwnMoneySlip
         }
     } else {
@@ -1198,6 +1323,8 @@ private fun ReportsScreen(
     val companySlipCents = selectedSlips.filter { it.advanceId != null && it.advanceId in selectedAdvanceIds }.sumOf { it.companyPaidCents }
     val returnedCents = selectedReturns.sumOf { it.amountCents }
     val outstandingCents = receivedCents - companySlipCents - returnedCents
+    val currentOwnMoney = selectedSlips.sumOf { it.ownMoneyCents }
+    val currentReimbursed = selectedReimbursements.sumOf { it.amountCents }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         AdvancePicker(activeAdvances, selectedAdvanceId, { selectedAdvanceId = it })
@@ -1205,9 +1332,15 @@ private fun ReportsScreen(
             Column(Modifier.fillMaxWidth().padding(14.dp)) {
                 Text("Reconciliation", fontWeight = FontWeight.Bold)
                 Text("Received ${money(receivedCents)}")
-                Text("Slips ${money(companySlipCents)}")
+                Text("Company-funded slips ${money(companySlipCents)}")
                 Text("Returned ${money(returnedCents)}")
-                Text("Outstanding ${money(outstandingCents)}", fontWeight = FontWeight.Bold)
+                Text("Outstanding advance ${money(outstandingCents)}", fontWeight = FontWeight.Bold)
+                if (selectedAdvanceId == null && currentOwnMoney > 0L) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("Personal funds used ${money(currentOwnMoney)}")
+                    Text("Personal funds reimbursed ${money(currentReimbursed)}")
+                    Text("ECI owes ${money((currentOwnMoney - currentReimbursed).coerceAtLeast(0L))}", fontWeight = FontWeight.Bold)
+                }
             }
         }
         if (selectedSlips.isEmpty()) {
@@ -1216,9 +1349,12 @@ private fun ReportsScreen(
             Button(
                 onClick = {
                     runCatching {
+                        val documentNumber = documentNumberStore.nextNumber()
                         val label = selectedAdvanceId?.let { id -> activeAdvances.firstOrNull { it.id == id }?.project?.ifBlank { "Advance #$id" } } ?: "Current report"
-                        val file = PdfExporter.officePack(context, label, selectedAdvances, selectedSlips, selectedReturns, selectedReimbursements)
-                        shareFile(context, file, "application/pdf", "ECI Office Pack")
+                        val file = PdfExporter.officePack(
+                            context, label, selectedAdvances, selectedSlips, selectedReturns, selectedReimbursements, documentNumber
+                        )
+                        shareFile(context, file, "application/pdf", "ECI Office Pack $documentNumber")
                     }.onFailure { Toast.makeText(context, "Could not create Office Pack: ${it.message}", Toast.LENGTH_LONG).show() }
                 }, modifier = Modifier.fillMaxWidth()
             ) { Text("Create & share Office Pack PDF") }
@@ -1258,6 +1394,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
     var logoPath by remember { mutableStateOf(prefs.getString("company_logo_path", "") ?: "") }
     var officeEmail by remember { mutableStateOf(prefs.getString("office_email", "") ?: "") }
     var dextEmail by remember { mutableStateOf(prefs.getString("dext_email", "") ?: "") }
+    var documentPrefix by remember { mutableStateOf(prefs.getString("document_prefix", DocumentNumberStore.DEFAULT_PREFIX) ?: DocumentNumberStore.DEFAULT_PREFIX) }
     var restoreFile by remember { mutableStateOf<File?>(null) }
     var showClearDialog by remember { mutableStateOf(false) }
     var clearActive by remember { mutableStateOf(false) }
@@ -1300,6 +1437,8 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         SectionTitle("Report identity")
         Text("These details appear on the accountant Office Pack.", style = MaterialTheme.typography.bodySmall)
         TextFieldSimple("User / Submitted by *", name, { name = it })
+        TextFieldSimple("Document prefix", documentPrefix, { documentPrefix = it })
+        Text("Next reports use ${DocumentNumberStore.normalizePrefix(documentPrefix)}-YYYYMMDD-N. Archived reports keep their original number.", style = MaterialTheme.typography.bodySmall)
 
         Spacer(Modifier.height(6.dp)); SectionTitle("Company details")
         TextFieldSimple("Company name", company, { company = it })
@@ -1348,6 +1487,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                 .putString("company_logo_path", logoPath)
                 .putString("office_email", officeEmail.trim())
                 .putString("dext_email", dextEmail.trim())
+                .putString("document_prefix", DocumentNumberStore.normalizePrefix(documentPrefix))
                 .apply()
             Toast.makeText(context, "Report and email settings saved", Toast.LENGTH_SHORT).show()
         }, modifier = Modifier.fillMaxWidth()) { Text("Save settings") }
@@ -1369,7 +1509,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         }
 
         Spacer(Modifier.height(12.dp))
-        InfoCard("Storage", "Version 0.7.4 stores the database, receipt images, completed report archive and report branding privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
+        InfoCard("Storage", "Version 0.7.5 stores the database, receipt images, completed report archive, document numbering and report branding privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
     }
 
     restoreFile?.let { file ->
@@ -1418,7 +1558,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                     Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearReturns, { clearReturns = it }); Text("Money returned records (${returns.size})") }
                     Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearOwnMoney, { clearOwnMoney = it }); Text("Own-money allocations (${slips.count { it.ownMoneyCents > 0L || it.paymentType != PaymentType.ADVANCE }}) — keeps slips") }
                     Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearReimbursements, { clearReimbursements = it }); Text("Reimbursement records (${reimbursements.size})") }
-                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearSettings, { clearSettings = it }); Text("Report identity, company details, logo and email settings") }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(clearSettings, { clearSettings = it }); Text("Report identity, company details, document prefix, logo and email settings") }
                 }
             },
             confirmButton = {
@@ -1429,12 +1569,13 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                     } else {
                         repository.clearSelectedData(clearActive, clearArchived, clearSlips, clearReturns, clearOwnMoney, clearReimbursements)
                         if (clearSlips || clearOwnMoney || clearReimbursements) PersonalReportArchiveStore(context).clear()
+                        if (clearActive || clearArchived || clearSlips || clearReturns || clearOwnMoney) AdvanceReportArchiveStore(context).clear()
                         if (clearSettings) {
                             prefs.edit().clear().apply()
                             runCatching { if (logoPath.isNotBlank()) File(logoPath).delete() }
                             name = "Dave"; company = "ECI Automation"; companyRegistration = ""; companyVat = ""
                             companyPhone = ""; companyEmail = ""; companyAddress = ""; logoPath = ""
-                            officeEmail = ""; dextEmail = ""
+                            officeEmail = ""; dextEmail = ""; documentPrefix = DocumentNumberStore.DEFAULT_PREFIX
                         }
                         Toast.makeText(context, "Selected data cleared", Toast.LENGTH_LONG).show()
                         showClearDialog = false
@@ -1495,6 +1636,30 @@ private fun MoneyField(label: String, value: String, onChange: (String) -> Unit,
         modifier = Modifier.fillMaxWidth(), singleLine = true, isError = error,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
     )
+}
+
+private fun launchPreparedReportEmail(
+    context: android.content.Context,
+    file: File,
+    documentNumber: String,
+    reportName: String
+) {
+    val prefs = context.getSharedPreferences("settings", 0)
+    val officeEmail = prefs.getString("office_email", "")?.trim().orEmpty()
+    if (officeEmail.isBlank()) {
+        Toast.makeText(context, "$documentNumber archived. Add an Office email in Settings to prepare email automatically.", Toast.LENGTH_LONG).show()
+        return
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/pdf"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_EMAIL, arrayOf(officeEmail))
+        putExtra(Intent.EXTRA_SUBJECT, "$reportName - $documentNumber")
+        putExtra(Intent.EXTRA_TEXT, "Please find attached $reportName $documentNumber generated by ECI Slip Manager.")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Send $documentNumber"))
 }
 
 private fun shareFile(context: android.content.Context, file: File, mime: String, subject: String) {

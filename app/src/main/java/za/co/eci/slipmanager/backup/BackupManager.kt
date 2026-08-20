@@ -4,6 +4,8 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import za.co.eci.slipmanager.data.Advance
+import za.co.eci.slipmanager.data.AdvanceReportArchiveStore
+import za.co.eci.slipmanager.data.DocumentNumberStore
 import za.co.eci.slipmanager.data.MoneyReturn
 import za.co.eci.slipmanager.data.PaymentType
 import za.co.eci.slipmanager.data.PersonalReportArchiveStore
@@ -26,7 +28,7 @@ object BackupManager {
         val outDir = File(context.cacheDir, "backup").apply { mkdirs() }
         val file = File(outDir, "ECI_Slip_Manager_Backup_${System.currentTimeMillis()}.zip")
         val json = JSONObject().apply {
-            put("version", 4)
+            put("version", 5)
             put("advances", JSONArray().apply { advances.forEach { put(advanceJson(it)) } })
             put("slips", JSONArray().apply { slips.forEach { put(slipJson(it)) } })
             put("returns", JSONArray().apply { returns.forEach { put(returnJson(it)) } })
@@ -54,6 +56,24 @@ object BackupManager {
             archivedReports.listFiles()?.filter { it.isFile }?.forEach { report ->
                 zip.putNextEntry(ZipEntry("report_archive/reports/${report.name}"))
                 report.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+            val advanceMetadata = File(context.filesDir, AdvanceReportArchiveStore.METADATA_FILE_NAME)
+            if (advanceMetadata.exists()) {
+                zip.putNextEntry(ZipEntry("report_archive/${AdvanceReportArchiveStore.METADATA_FILE_NAME}"))
+                advanceMetadata.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+            val advanceReports = File(context.filesDir, AdvanceReportArchiveStore.REPORTS_DIR_NAME)
+            advanceReports.listFiles()?.filter { it.isFile }?.forEach { report ->
+                zip.putNextEntry(ZipEntry("report_archive/advance_reports/${report.name}"))
+                report.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+            val documentCounters = File(context.filesDir, DocumentNumberStore.FILE_NAME)
+            if (documentCounters.exists()) {
+                zip.putNextEntry(ZipEntry("report_archive/${DocumentNumberStore.FILE_NAME}"))
+                documentCounters.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
             }
         }
@@ -103,6 +123,29 @@ object BackupManager {
                     val target = File(archiveReportsDir, File(entry.name).name)
                     zip.getInputStream(entry).use { input -> target.outputStream().use { input.copyTo(it) } }
                 }
+
+            val advanceMetadata = File(context.filesDir, AdvanceReportArchiveStore.METADATA_FILE_NAME)
+            val advanceReportsDir = File(context.filesDir, AdvanceReportArchiveStore.REPORTS_DIR_NAME)
+            advanceMetadata.delete()
+            advanceReportsDir.deleteRecursively()
+            advanceReportsDir.mkdirs()
+            zip.getEntry("report_archive/${AdvanceReportArchiveStore.METADATA_FILE_NAME}")?.let { entry ->
+                zip.getInputStream(entry).use { input -> advanceMetadata.outputStream().use { input.copyTo(it) } }
+            }
+            zip.entries().asSequence()
+                .filter { !it.isDirectory && it.name.startsWith("report_archive/advance_reports/") }
+                .forEach { entry ->
+                    val target = File(advanceReportsDir, File(entry.name).name)
+                    zip.getInputStream(entry).use { input -> target.outputStream().use { input.copyTo(it) } }
+                }
+
+            // Never reset counters when restoring an older backup that did not
+            // contain them; preserving the current counter avoids duplicate
+            // accounting document numbers.
+            zip.getEntry("report_archive/${DocumentNumberStore.FILE_NAME}")?.let { entry ->
+                val counterFile = File(context.filesDir, DocumentNumberStore.FILE_NAME)
+                zip.getInputStream(entry).use { input -> counterFile.outputStream().use { input.copyTo(it) } }
+            }
 
             return Restored(advances, slips, returns, reimbursements)
         }
