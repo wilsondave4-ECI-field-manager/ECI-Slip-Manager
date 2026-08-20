@@ -26,19 +26,6 @@ jobs:
           git commit -m "Record signed release run [skip ci]"
           git push
 
-      - name: Apply v0.7.3 document scanner upgrade
-        run: python .github/scripts/apply_v073_scanner.py
-
-      - name: Persist v0.7.3 scanner source
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/za/co/eci/slipmanager/ui/SlipApp.kt
-          if ! git diff --cached --quiet; then
-            git commit -m "Apply B&W document scanner v0.7.3 [skip ci]"
-            git push
-          fi
-
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
