@@ -11,6 +11,7 @@ import za.co.eci.slipmanager.data.PaymentType
 import za.co.eci.slipmanager.data.PersonalReportArchiveStore
 import za.co.eci.slipmanager.data.Reimbursement
 import za.co.eci.slipmanager.data.Slip
+import za.co.eci.slipmanager.data.SyncState
 import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipEntry
@@ -192,6 +193,7 @@ object BackupManager {
 
     private fun slipFromJson(o: JSONObject) = Slip(
         id = o.getLong("id"),
+        syncState = SyncState.LOCAL_ONLY,
         advanceId = if (o.isNull("advanceId")) null else o.getLong("advanceId"),
         supplier = o.optString("supplier"),
         dateEpochDay = if (o.isNull("date")) null else o.getLong("date"),

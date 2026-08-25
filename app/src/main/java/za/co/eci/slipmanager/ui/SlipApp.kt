@@ -78,16 +78,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.delay
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import za.co.eci.slipmanager.backup.BackupManager
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.AdvanceReportArchiveStore
+import za.co.eci.slipmanager.data.CompanyCard
 import za.co.eci.slipmanager.data.DocumentNumberStore
 import za.co.eci.slipmanager.data.MoneyReturn
 import za.co.eci.slipmanager.data.PaymentType
@@ -96,6 +99,7 @@ import za.co.eci.slipmanager.data.PersonalReportArchiveStore
 import za.co.eci.slipmanager.data.Reimbursement
 import za.co.eci.slipmanager.data.Slip
 import za.co.eci.slipmanager.data.SlipRepository
+import za.co.eci.slipmanager.data.SyncState
 import za.co.eci.slipmanager.ocr.ReceiptGuess
 import za.co.eci.slipmanager.ocr.ReceiptOcr
 import za.co.eci.slipmanager.ocr.ReceiptScanProcessor
@@ -110,6 +114,65 @@ import java.util.Locale
 private enum class Screen { HOME, ADVANCES, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
 
 @Composable
+private fun ServerLoginScreen(
+    message: String,
+    onSignIn: (String, String) -> Unit,
+    onForgotPassword: (String) -> Unit
+) {
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    Column(
+        Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("ECI Slip Manager", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("Sign in once to connect this phone. Afterwards, scanning and saving receipts works offline.")
+        Spacer(Modifier.height(20.dp))
+        OutlinedTextField(email, { email = it }, label = { Text("Work email") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            password, { password = it }, label = { Text("Password") }, singleLine = true,
+            visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
+        )
+        if (message.isNotBlank()) {
+            Spacer(Modifier.height(10.dp)); Text(message, color = MaterialTheme.colorScheme.primary)
+        }
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { onSignIn(email.trim(), password) },
+            enabled = email.isNotBlank() && password.isNotBlank(), modifier = Modifier.fillMaxWidth()
+        ) { Text("Sign in") }
+        TextButton(
+            onClick = { onForgotPassword(email.trim()) }, enabled = email.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Forgot password") }
+    }
+}
+
+@Composable
+private fun FirstLoginPasswordScreen(message: String, onSave: (String) -> Unit, onSignOut: () -> Unit) {
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    val valid = password.length >= 10 && password == confirm
+    Column(
+        Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("Create your permanent password", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("Your temporary password worked. Choose a private password with at least 10 characters.")
+        Spacer(Modifier.height(18.dp))
+        OutlinedTextField(password, { password = it }, label = { Text("New password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(confirm, { confirm = it }, label = { Text("Confirm password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        if (confirm.isNotBlank() && password != confirm) Text("The passwords do not match", color = MaterialTheme.colorScheme.error)
+        if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = { onSave(password) }, enabled = valid, modifier = Modifier.fillMaxWidth()) { Text("Create permanent password") }
+        TextButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) { Text("Sign out") }
+    }
+}
+
+@Composable
 fun SlipApp(repository: SlipRepository) {
     val context = LocalContext.current
     val activity = context as Activity
@@ -117,6 +180,24 @@ fun SlipApp(repository: SlipRepository) {
     val slips by repository.slips.collectAsState()
     val returns by repository.returns.collectAsState()
     val reimbursements by repository.reimbursements.collectAsState()
+    val cards by repository.cards.collectAsState()
+    val session by repository.session.collectAsState()
+    val serverMessage by repository.serverMessage.collectAsState()
+
+    if (session == null) {
+        ServerLoginScreen(serverMessage, repository::signIn, repository::forgotPassword)
+        return
+    }
+    if (session?.mustChangePassword == true) {
+        FirstLoginPasswordScreen(serverMessage, repository::changePassword, repository::signOut)
+        return
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(3_000)
+            repository.refresh()
+        }
+    }
     val personalArchiveStore = remember { PersonalReportArchiveStore(context) }
     val advanceArchiveStore = remember { AdvanceReportArchiveStore(context) }
     val documentNumberStore = remember { DocumentNumberStore(context) }
@@ -422,11 +503,12 @@ fun SlipApp(repository: SlipRepository) {
                     EditSlipScreen(
                         original = original,
                         advances = advances.filter { !it.archived || repository.reconciliation(it.id).outstandingCents != 0L },
+                        cards = cards,
                         onSave = { candidate ->
                             var adjusted = candidate
                             var movedToPersonal = 0L
                             val advanceId = candidate.advanceId
-                            if (advanceId != null) {
+                            if (advanceId != null && candidate.serverAdvanceId == null) {
                                 advances.firstOrNull { it.id == advanceId }?.let { advance ->
                                     val otherSpent = slips.filter { it.advanceId == advanceId && it.id != candidate.id }
                                         .sumOf { it.companyPaidCents }
@@ -1119,7 +1201,14 @@ private fun SlipCard(slip: Slip, onOpen: (Slip) -> Unit) {
             Column(Modifier.weight(1f)) {
                 Text(slip.supplier.ifBlank { "Supplier missing" }, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${slip.dateEpochDay?.let(::dateText) ?: "Date missing"} • ${slip.purpose.ifBlank { "Purpose missing" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(if (slip.isComplete) "Complete" else "Missing information", color = if (slip.isComplete) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                val status = when {
+                    !slip.isComplete -> "Missing information"
+                    slip.syncState == SyncState.SYNCED -> "Synced"
+                    slip.syncState == SyncState.FAILED -> "Sync needs attention: ${slip.syncError}"
+                    slip.syncState == SyncState.LOCAL_ONLY -> "Stored on this phone"
+                    else -> "Saved offline • waiting to sync"
+                }
+                Text(status, color = if (slip.isComplete && slip.syncState != SyncState.FAILED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
             }
             Text(money(slip.totalCents), fontWeight = FontWeight.Bold)
         }
@@ -1130,6 +1219,7 @@ private fun SlipCard(slip: Slip, onOpen: (Slip) -> Unit) {
 private fun EditSlipScreen(
     original: Slip,
     advances: List<Advance>,
+    cards: List<CompanyCard>,
     onSave: (Slip) -> Unit,
     onDelete: (() -> Unit)?,
     onCancel: () -> Unit
@@ -1149,6 +1239,7 @@ private fun EditSlipScreen(
     var selectedAdvanceId by remember(original.id, original.imagePath) {
         mutableStateOf(original.advanceId ?: if (original.id == 0L) advances.firstOrNull { !it.archived }?.id else null)
     }
+    var selectedCardId by remember(original.id, original.imagePath) { mutableStateOf(original.serverCardId) }
     var deleteConfirm by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1171,10 +1262,15 @@ private fun EditSlipScreen(
         TextFieldSimple("Payment reference", paymentRef, { paymentRef = it })
         PaymentTypePicker(paymentType) { selected ->
             paymentType = selected
-            if (selected == PaymentType.OWN) selectedAdvanceId = null
+            if (selected == PaymentType.OWN || selected == PaymentType.CARD) selectedAdvanceId = null
+            if (selected != PaymentType.CARD) selectedCardId = null
         }
-        if (paymentType != PaymentType.OWN) {
+        if (paymentType == PaymentType.ADVANCE || paymentType == PaymentType.SPLIT) {
             AdvancePicker(advances, selectedAdvanceId, { selectedAdvanceId = it })
+        }
+        if (paymentType == PaymentType.CARD) {
+            CardPicker(cards, selectedCardId, { selectedCardId = it })
+            if (cards.isEmpty()) Text("No company card is currently assigned to you. Connect and refresh first.", color = MaterialTheme.colorScheme.error)
         }
         if (paymentType == PaymentType.SPLIT) {
             MoneyField("My own money portion", ownMoney, { ownMoney = it })
@@ -1194,6 +1290,7 @@ private fun EditSlipScreen(
                 val epoch = parseDate(date)
                 val ownCents = when (paymentType) {
                     PaymentType.ADVANCE -> 0L
+                    PaymentType.CARD -> 0L
                     PaymentType.OWN -> totalCents ?: 0L
                     PaymentType.SPLIT -> parseMoney(ownMoney) ?: -1L
                 }
@@ -1201,12 +1298,17 @@ private fun EditSlipScreen(
                     Toast.makeText(context, "Total is required for reconciliation.", Toast.LENGTH_SHORT).show()
                 } else if (paymentType == PaymentType.SPLIT && (ownCents <= 0L || ownCents >= totalCents)) {
                     Toast.makeText(context, "Enter the part of the receipt that you paid yourself.", Toast.LENGTH_LONG).show()
-                } else if (paymentType != PaymentType.OWN && selectedAdvanceId == null) {
+                } else if ((paymentType == PaymentType.ADVANCE || paymentType == PaymentType.SPLIT) && selectedAdvanceId == null) {
                     Toast.makeText(context, "Select the advance that paid the company portion.", Toast.LENGTH_LONG).show()
+                } else if (paymentType == PaymentType.CARD && selectedCardId == null) {
+                    Toast.makeText(context, "Select the company card used for this purchase.", Toast.LENGTH_LONG).show()
                 } else {
+                    val selectedAdvance = advances.firstOrNull { it.id == selectedAdvanceId }
                     onSave(
                         original.copy(
-                            advanceId = if (paymentType == PaymentType.OWN) null else selectedAdvanceId,
+                            advanceId = if (paymentType == PaymentType.ADVANCE || paymentType == PaymentType.SPLIT) selectedAdvanceId else null,
+                            serverAdvanceId = if (paymentType == PaymentType.ADVANCE || paymentType == PaymentType.SPLIT) selectedAdvance?.serverId else null,
+                            serverCardId = if (paymentType == PaymentType.CARD) selectedCardId else null,
                             supplier = supplier.trim(),
                             dateEpochDay = epoch,
                             receiptNumber = receiptNo.trim(),
@@ -1217,7 +1319,9 @@ private fun EditSlipScreen(
                             project = project.trim(),
                             paymentReference = paymentRef.trim(),
                             paymentType = paymentType,
-                            ownMoneyCents = ownCents
+                            ownMoneyCents = ownCents,
+                            syncState = SyncState.PENDING,
+                            syncError = ""
                         )
                     )
                 }
@@ -1246,6 +1350,7 @@ private fun PaymentTypePicker(selected: PaymentType, onSelected: (PaymentType) -
     var open by remember { mutableStateOf(false) }
     val label = when (selected) {
         PaymentType.ADVANCE -> "Paid with: Company advance"
+        PaymentType.CARD -> "Paid with: Company card"
         PaymentType.OWN -> "Paid with: My own money"
         PaymentType.SPLIT -> "Paid with: Split payment"
     }
@@ -1253,8 +1358,28 @@ private fun PaymentTypePicker(selected: PaymentType, onSelected: (PaymentType) -
         OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) { Text(label) }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(text = { Text("Company advance") }, onClick = { onSelected(PaymentType.ADVANCE); open = false })
+            DropdownMenuItem(text = { Text("Company card") }, onClick = { onSelected(PaymentType.CARD); open = false })
             DropdownMenuItem(text = { Text("My own money") }, onClick = { onSelected(PaymentType.OWN); open = false })
             DropdownMenuItem(text = { Text("Split payment") }, onClick = { onSelected(PaymentType.SPLIT); open = false })
+        }
+    }
+}
+
+@Composable
+private fun CardPicker(cards: List<CompanyCard>, selectedId: String?, onSelected: (String?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val selected = cards.firstOrNull { it.serverId == selectedId }
+    Box {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(selected?.let { "${it.name} • ${money(it.balanceCents)}" } ?: "Select assigned company card")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            cards.forEach { card ->
+                DropdownMenuItem(
+                    text = { Text("${card.name} • ${money(card.balanceCents)}") },
+                    onClick = { onSelected(card.serverId); open = false }
+                )
+            }
         }
     }
 }
@@ -1404,6 +1529,9 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
     var clearOwnMoney by remember { mutableStateOf(false) }
     var clearReimbursements by remember { mutableStateOf(false) }
     var clearSettings by remember { mutableStateOf(false) }
+    val session by repository.session.collectAsState()
+    val serverMessage by repository.serverMessage.collectAsState()
+    val pendingCount = slips.count { it.syncState != SyncState.SYNCED && it.syncState != SyncState.LOCAL_ONLY }
 
     val restorePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) {
@@ -1434,6 +1562,14 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SectionTitle("ECI server")
+        Text("Signed in as ${session?.displayName ?: "Unknown"} • ${session?.email.orEmpty()}")
+        Text(if (pendingCount == 0) "All receipts synced" else "$pendingCount receipt(s) waiting to sync")
+        if (serverMessage.isNotBlank()) Text(serverMessage, style = MaterialTheme.typography.bodySmall)
+        Button(onClick = repository::syncNow, modifier = Modifier.fillMaxWidth()) { Text("Sync now") }
+        OutlinedButton(onClick = repository::refreshFunding, modifier = Modifier.fillMaxWidth()) { Text("Refresh advances and cards") }
+        TextButton(onClick = repository::signOut, modifier = Modifier.fillMaxWidth()) { Text("Sign out from this phone") }
+        Spacer(Modifier.height(8.dp))
         SectionTitle("Report identity")
         Text("These details appear on the accountant Office Pack.", style = MaterialTheme.typography.bodySmall)
         TextFieldSimple("User / Submitted by *", name, { name = it })
@@ -1509,7 +1645,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         }
 
         Spacer(Modifier.height(12.dp))
-        InfoCard("Storage", "Version 0.7.5 stores the database, receipt images, completed report archive, document numbering and report branding privately on this Android phone. No AppDeploy, Replit, VPS, or cloud account is required.")
+        InfoCard("Offline storage", "The scanner, OCR, database and receipt images stay on this Android phone. Completed receipts queue safely and sync to the ECI VPS whenever a connection is available.")
     }
 
     restoreFile?.let { file ->

@@ -179,6 +179,7 @@ object PdfExporter {
             y += 13f
             val funding = when (slip.paymentType) {
                 PaymentType.ADVANCE -> "Company advance ${fmt(slip.companyPaidCents)}"
+                PaymentType.CARD -> "Company card ${fmt(slip.companyPaidCents)}"
                 PaymentType.OWN -> "Own money ${fmt(slip.ownMoneyCents)}"
                 PaymentType.SPLIT -> "Company ${fmt(slip.companyPaidCents)} + Own ${fmt(slip.ownMoneyCents)}"
             }
@@ -380,6 +381,7 @@ object PdfExporter {
         canvas.drawText("Ex VAT $exVatText | VAT $vatText | Total ${fmt(slip.totalCents)}", 36f, 116f, body)
         val funding = when (slip.paymentType) {
             PaymentType.ADVANCE -> "Company advance ${fmt(slip.companyPaidCents)}"
+            PaymentType.CARD -> "Company card ${fmt(slip.companyPaidCents)}"
             PaymentType.OWN -> "Personal funds ${fmt(slip.ownMoneyCents)}"
             PaymentType.SPLIT -> "Company ${fmt(slip.companyPaidCents)} + Personal ${fmt(slip.ownMoneyCents)}"
         }

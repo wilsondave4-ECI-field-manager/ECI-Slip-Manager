@@ -1,9 +1,13 @@
 package za.co.eci.slipmanager.data
 
-enum class PaymentType { ADVANCE, OWN, SPLIT }
+import java.util.UUID
+
+enum class PaymentType { ADVANCE, CARD, OWN, SPLIT }
+enum class SyncState { LOCAL_ONLY, PENDING, SYNCING, SYNCED, FAILED }
 
 data class Advance(
     val id: Long = 0,
+    val serverId: String? = null,
     val dateEpochDay: Long,
     val amountCents: Long,
     val reference: String = "",
@@ -15,7 +19,13 @@ data class Advance(
 
 data class Slip(
     val id: Long = 0,
+    val clientUuid: String = UUID.randomUUID().toString(),
+    val serverId: String? = null,
+    val syncState: SyncState = SyncState.PENDING,
+    val syncError: String = "",
     val advanceId: Long? = null,
+    val serverAdvanceId: String? = null,
+    val serverCardId: String? = null,
     val supplier: String = "",
     val dateEpochDay: Long? = null,
     val receiptNumber: String = "",
@@ -37,6 +47,25 @@ data class Slip(
     val companyPaidCents: Long
         get() = (totalCents - ownMoneyCents).coerceAtLeast(0L)
 }
+
+data class CompanyCard(
+    val serverId: String,
+    val name: String,
+    val reference: String = "",
+    val balanceCents: Long = 0L
+)
+
+data class ServerSession(
+    val cookie: String,
+    val userId: String,
+    val employeeId: String,
+    val email: String,
+    val displayName: String,
+    val companyId: String,
+    val companyName: String,
+    val reportCode: String = "",
+    val mustChangePassword: Boolean = false
+)
 
 data class MoneyReturn(
     val id: Long = 0,
