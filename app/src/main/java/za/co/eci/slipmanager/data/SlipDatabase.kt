@@ -17,6 +17,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             """
             CREATE TABLE advances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id TEXT NULL UNIQUE,
                 date_epoch_day INTEGER NOT NULL,
                 amount_cents INTEGER NOT NULL,
                 reference TEXT NOT NULL DEFAULT '',
@@ -31,7 +32,13 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             """
             CREATE TABLE slips (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_uuid TEXT NOT NULL,
+                server_id TEXT NULL,
+                sync_state TEXT NOT NULL DEFAULT 'PENDING',
+                sync_error TEXT NOT NULL DEFAULT '',
                 advance_id INTEGER NULL,
+                server_advance_id TEXT NULL,
+                server_card_id TEXT NULL,
                 supplier TEXT NOT NULL DEFAULT '',
                 date_epoch_day INTEGER NULL,
                 receipt_number TEXT NOT NULL DEFAULT '',
@@ -63,8 +70,11 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             """.trimIndent()
         )
         createReimbursementsTable(db)
+        createCompanyCardsTable(db)
         db.execSQL("CREATE INDEX idx_slips_advance ON slips(advance_id)")
         db.execSQL("CREATE INDEX idx_slips_supplier ON slips(supplier)")
+        db.execSQL("CREATE UNIQUE INDEX idx_slips_client_uuid ON slips(client_uuid)")
+        db.execSQL("CREATE INDEX idx_slips_sync_state ON slips(sync_state)")
     }
 
     private fun createReimbursementsTable(db: SQLiteDatabase) {
@@ -81,6 +91,19 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         )
     }
 
+    private fun createCompanyCardsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS company_cards (
+                server_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                reference TEXT NOT NULL DEFAULT '',
+                balance_cents INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent()
+        )
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE advances ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
@@ -90,6 +113,19 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE slips ADD COLUMN payment_type TEXT NOT NULL DEFAULT 'ADVANCE'")
             db.execSQL("ALTER TABLE slips ADD COLUMN own_money_cents INTEGER NOT NULL DEFAULT 0")
             createReimbursementsTable(db)
+        }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE advances ADD COLUMN server_id TEXT NULL")
+            db.execSQL("ALTER TABLE slips ADD COLUMN client_uuid TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE slips ADD COLUMN server_id TEXT NULL")
+            db.execSQL("ALTER TABLE slips ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'LOCAL_ONLY'")
+            db.execSQL("ALTER TABLE slips ADD COLUMN sync_error TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE slips ADD COLUMN server_advance_id TEXT NULL")
+            db.execSQL("ALTER TABLE slips ADD COLUMN server_card_id TEXT NULL")
+            createCompanyCardsTable(db)
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_advances_server_id ON advances(server_id) WHERE server_id IS NOT NULL")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_slips_client_uuid ON slips(client_uuid) WHERE client_uuid<>''")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_slips_sync_state ON slips(sync_state)")
         }
     }
 
@@ -102,6 +138,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 add(
                     Advance(
                         id = c.getLong(c.getColumnIndexOrThrow("id")),
+                        serverId = c.getColumnIndex("server_id").takeIf { it >= 0 && !c.isNull(it) }?.let(c::getString),
                         dateEpochDay = c.getLong(c.getColumnIndexOrThrow("date_epoch_day")),
                         amountCents = c.getLong(c.getColumnIndexOrThrow("amount_cents")),
                         reference = c.getString(c.getColumnIndexOrThrow("reference")),
@@ -130,7 +167,15 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 add(
                     Slip(
                         id = c.getLong(c.getColumnIndexOrThrow("id")),
+                        clientUuid = c.getColumnIndex("client_uuid").takeIf { it >= 0 }?.let(c::getString).orEmpty(),
+                        serverId = c.getColumnIndex("server_id").takeIf { it >= 0 && !c.isNull(it) }?.let(c::getString),
+                        syncState = c.getColumnIndex("sync_state").takeIf { it >= 0 }?.let {
+                            runCatching { SyncState.valueOf(c.getString(it)) }.getOrDefault(SyncState.LOCAL_ONLY)
+                        } ?: SyncState.LOCAL_ONLY,
+                        syncError = c.getColumnIndex("sync_error").takeIf { it >= 0 }?.let(c::getString).orEmpty(),
                         advanceId = if (c.isNull(advanceCol)) null else c.getLong(advanceCol),
+                        serverAdvanceId = c.getColumnIndex("server_advance_id").takeIf { it >= 0 && !c.isNull(it) }?.let(c::getString),
+                        serverCardId = c.getColumnIndex("server_card_id").takeIf { it >= 0 && !c.isNull(it) }?.let(c::getString),
                         supplier = c.getString(c.getColumnIndexOrThrow("supplier")),
                         dateEpochDay = if (c.isNull(dateCol)) null else c.getLong(dateCol),
                         receiptNumber = c.getString(c.getColumnIndexOrThrow("receipt_number")),
@@ -189,6 +234,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     fun upsertAdvance(item: Advance): Long {
         val values = ContentValues().apply {
+            if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
             put("date_epoch_day", item.dateEpochDay)
             put("amount_cents", item.amountCents)
             put("reference", item.reference)
@@ -207,7 +253,13 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     fun upsertSlip(item: Slip): Long {
         val values = ContentValues().apply {
+            put("client_uuid", item.clientUuid)
+            if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
+            put("sync_state", item.syncState.name)
+            put("sync_error", item.syncError)
             if (item.advanceId == null) putNull("advance_id") else put("advance_id", item.advanceId)
+            if (item.serverAdvanceId == null) putNull("server_advance_id") else put("server_advance_id", item.serverAdvanceId)
+            if (item.serverCardId == null) putNull("server_card_id") else put("server_card_id", item.serverCardId)
             put("supplier", item.supplier)
             if (item.dateEpochDay == null) putNull("date_epoch_day") else put("date_epoch_day", item.dateEpochDay)
             put("receipt_number", item.receiptNumber)
@@ -278,6 +330,56 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         writableDatabase.update("slips", values, "own_money_cents>0 OR payment_type!='ADVANCE'", null)
     }
 
+    fun pendingSlips(): List<Slip> = getSlips().filter {
+        it.syncState == SyncState.PENDING || it.syncState == SyncState.FAILED || it.syncState == SyncState.SYNCING
+    }
+
+    fun markSlipSyncing(id: Long) {
+        writableDatabase.update("slips", ContentValues().apply {
+            put("sync_state", SyncState.SYNCING.name); put("sync_error", "")
+        }, "id=?", arrayOf(id.toString()))
+    }
+
+    fun markSlipSynced(id: Long, serverId: String) {
+        writableDatabase.update("slips", ContentValues().apply {
+            put("server_id", serverId); put("sync_state", SyncState.SYNCED.name); put("sync_error", "")
+        }, "id=?", arrayOf(id.toString()))
+    }
+
+    fun markSlipFailed(id: Long, error: String) {
+        writableDatabase.update("slips", ContentValues().apply {
+            put("sync_state", SyncState.FAILED.name); put("sync_error", error.take(500))
+        }, "id=?", arrayOf(id.toString()))
+    }
+
+    fun replaceServerFunding(advances: List<Advance>, cards: List<CompanyCard>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("advances", "server_id IS NOT NULL", null)
+            advances.forEach(::upsertAdvance)
+            db.delete("company_cards", null, null)
+            cards.forEach { card ->
+                db.insertOrThrow("company_cards", null, ContentValues().apply {
+                    put("server_id", card.serverId); put("name", card.name)
+                    put("reference", card.reference); put("balance_cents", card.balanceCents)
+                })
+            }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+
+    fun getCompanyCards(): List<CompanyCard> = readableDatabase.query(
+        "company_cards", null, null, null, null, null, "name"
+    ).use { c -> buildList {
+        while (c.moveToNext()) add(CompanyCard(
+            serverId = c.getString(c.getColumnIndexOrThrow("server_id")),
+            name = c.getString(c.getColumnIndexOrThrow("name")),
+            reference = c.getString(c.getColumnIndexOrThrow("reference")),
+            balanceCents = c.getLong(c.getColumnIndexOrThrow("balance_cents"))
+        ))
+    } }
+
     fun replaceAll(
         advances: List<Advance>,
         slips: List<Slip>,
@@ -295,6 +397,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             advances.sortedBy { it.id }.forEach { item ->
                 val v = ContentValues().apply {
                     put("id", item.id)
+                    if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
                     put("date_epoch_day", item.dateEpochDay)
                     put("amount_cents", item.amountCents)
                     put("reference", item.reference)
@@ -308,7 +411,13 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             slips.sortedBy { it.id }.forEach { item ->
                 val v = ContentValues().apply {
                     put("id", item.id)
+                    put("client_uuid", item.clientUuid)
+                    if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
+                    put("sync_state", item.syncState.name)
+                    put("sync_error", item.syncError)
                     if (item.advanceId == null) putNull("advance_id") else put("advance_id", item.advanceId)
+                    if (item.serverAdvanceId == null) putNull("server_advance_id") else put("server_advance_id", item.serverAdvanceId)
+                    if (item.serverCardId == null) putNull("server_card_id") else put("server_card_id", item.serverCardId)
                     put("supplier", item.supplier)
                     if (item.dateEpochDay == null) putNull("date_epoch_day") else put("date_epoch_day", item.dateEpochDay)
                     put("receipt_number", item.receiptNumber)
@@ -354,6 +463,6 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
     }
 }

@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// v0.7.5 advance rollover, permanent reports and document numbering
+// v0.8.0 native offline scanner with VPS sync
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +19,13 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.7.5"
+        versionCode = 16
+        versionName = "0.8.0"
+        buildConfigField(
+            "String",
+            "ECI_SERVER_URL",
+            "\"${System.getenv("ECI_SERVER_URL") ?: "https://expenses-staging.digiteclabs.co.za"}\""
+        )
     }
 
     signingConfigs {
@@ -78,6 +83,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("androidx.work:work-runtime-ktx:2.11.0")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -88,4 +94,5 @@ dependencies {
 
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
