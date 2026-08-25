@@ -62,18 +62,24 @@ class ExpenseApi {
     }
 
     fun funding(session: ServerSession): ServerFunding {
-        val request = authorized(session, "$base/snapshot").get().build()
+        val request = authorized(session, "$base/employee/activity")
+            .header("Cache-Control", "no-cache")
+            .get().build()
         client.newCall(request).execute().use { response ->
             val payload = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw ApiException(response.code, errorMessage(payload, "Could not refresh company funding"))
-            val snapshot = JSONObject(payload).getJSONObject("snapshot")
-            val advancesJson = snapshot.optJSONArray("advances")
+            val root = JSONObject(payload)
+            if (!root.optBoolean("ok", true)) throw ApiException(502, errorMessage(payload, "Invalid employee activity response"))
+            val activity = root.optJSONObject("snapshot") ?: root
+            val advancesJson = activity.optJSONArray("advances")
             val advances = buildList {
                 if (advancesJson != null) for (i in 0 until advancesJson.length()) {
                     val o = advancesJson.getJSONObject(i)
+                    val paidDate = optionalString(o, "paid_date")
+                    val date = runCatching { LocalDate.parse(paidDate) }.getOrDefault(LocalDate.now())
                     add(Advance(
                         serverId = o.getString("id"),
-                        dateEpochDay = LocalDate.parse(o.getString("paid_date")).toEpochDay(),
+                        dateEpochDay = date.toEpochDay(),
                         amountCents = o.optString("remaining_cents", "0").toLongOrNull() ?: 0L,
                         reference = optionalString(o, "payment_reference"),
                         project = optionalString(o, "project_name").ifBlank { optionalString(o, "project_site") },
@@ -81,7 +87,7 @@ class ExpenseApi {
                     ))
                 }
             }
-            val cardsJson = snapshot.optJSONArray("companyCards")
+            val cardsJson = activity.optJSONArray("companyCards")
             val cards = buildList {
                 if (cardsJson != null) for (i in 0 until cardsJson.length()) {
                     val o = cardsJson.getJSONObject(i)

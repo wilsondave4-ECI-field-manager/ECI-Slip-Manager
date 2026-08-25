@@ -57,7 +57,7 @@ class ReceiptSyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             }
             runCatching {
                 val funding = api.funding(session)
-                db.replaceServerFunding(funding.advances, funding.cards)
+                db.replaceServerAdvances(funding.advances)
             }
             Result.success()
         } finally { db.close() }

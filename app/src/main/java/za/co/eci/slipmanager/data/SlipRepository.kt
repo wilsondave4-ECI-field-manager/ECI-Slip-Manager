@@ -127,19 +127,29 @@ class SlipRepository(context: Context) {
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { ExpenseApi().funding(current) } }
                 .onSuccess { funding ->
-                    withContext(Dispatchers.IO) { db.replaceServerFunding(funding.advances, funding.cards) }
+                    withContext(Dispatchers.IO) { db.replaceServerAdvances(funding.advances) }
                     refresh()
-                    _serverMessage.value = "Advances and cards are up to date"
+                    _serverMessage.value = "Connected — advances and cards are up to date"
                     ReceiptSyncWorker.request(appContext)
                     refreshCardDetails()
                 }
-                .onFailure { _serverMessage.value = "Offline — saved phone data is still available" }
+                .onFailure { error ->
+                    _serverMessage.value = when (error) {
+                        is za.co.eci.slipmanager.sync.ApiException -> if (error.status == 401) {
+                            "Your server session expired — sign out and sign in again"
+                        } else {
+                            "Server refresh failed (${error.status}): ${error.message}"
+                        }
+                        else -> "Could not reach the VPS: ${error.message ?: "connection failed"}"
+                    }
+                }
         }
     }
 
     fun syncNow() {
-        _serverMessage.value = "Sync queued — it will send when connected"
+        _serverMessage.value = "Sync started…"
         ReceiptSyncWorker.request(appContext)
+        refreshFunding()
     }
 
     fun refreshCardDetails() {

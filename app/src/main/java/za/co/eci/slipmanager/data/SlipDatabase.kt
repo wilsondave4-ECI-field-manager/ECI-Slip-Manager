@@ -434,6 +434,16 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         } finally { db.endTransaction() }
     }
 
+    fun replaceServerAdvances(advances: List<Advance>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("advances", "server_id IS NOT NULL", null)
+            advances.forEach(::upsertAdvance)
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+
     fun getCompanyCards(): List<CompanyCard> = readableDatabase.query(
         "company_cards", null, null, null, null, null, "name"
     ).use { c -> buildList {

@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// v0.8.1 native employee dashboard, offline requests and company cards
+// v0.8.2 live employee activity refresh and truthful sync status
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +19,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "0.8.1"
+        versionCode = 18
+        versionName = "0.8.2"
         buildConfigField(
             "String",
             "ECI_SERVER_URL",
