@@ -71,6 +71,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         )
         createReimbursementsTable(db)
         createCompanyCardsTable(db)
+        createMoneyRequestsTable(db)
         db.execSQL("CREATE INDEX idx_slips_advance ON slips(advance_id)")
         db.execSQL("CREATE INDEX idx_slips_supplier ON slips(supplier)")
         db.execSQL("CREATE UNIQUE INDEX idx_slips_client_uuid ON slips(client_uuid)")
@@ -104,6 +105,26 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         )
     }
 
+    private fun createMoneyRequestsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS money_requests (
+                client_uuid TEXT PRIMARY KEY,
+                server_id TEXT NULL,
+                sync_state TEXT NOT NULL DEFAULT 'PENDING',
+                sync_error TEXT NOT NULL DEFAULT '',
+                requested_cents INTEGER NOT NULL,
+                purpose TEXT NOT NULL,
+                project_site TEXT NOT NULL DEFAULT '',
+                required_date TEXT NOT NULL DEFAULT '',
+                employee_note TEXT NOT NULL DEFAULT '',
+                created_at_millis INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_money_requests_sync_state ON money_requests(sync_state)")
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE advances ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
@@ -127,6 +148,50 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_slips_client_uuid ON slips(client_uuid) WHERE client_uuid<>''")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_slips_sync_state ON slips(sync_state)")
         }
+        if (oldVersion < 5) createMoneyRequestsTable(db)
+    }
+
+    fun getMoneyRequests(): List<MoneyRequest> = readableDatabase.query(
+        "money_requests", null, null, null, null, null, "created_at_millis DESC"
+    ).use { c -> buildList {
+        while (c.moveToNext()) add(MoneyRequest(
+            clientUuid = c.getString(c.getColumnIndexOrThrow("client_uuid")),
+            serverId = c.getColumnIndexOrThrow("server_id").let { if (c.isNull(it)) null else c.getString(it) },
+            syncState = runCatching { SyncState.valueOf(c.getString(c.getColumnIndexOrThrow("sync_state"))) }.getOrDefault(SyncState.PENDING),
+            syncError = c.getString(c.getColumnIndexOrThrow("sync_error")),
+            requestedCents = c.getLong(c.getColumnIndexOrThrow("requested_cents")),
+            purpose = c.getString(c.getColumnIndexOrThrow("purpose")),
+            projectSite = c.getString(c.getColumnIndexOrThrow("project_site")),
+            requiredDate = c.getString(c.getColumnIndexOrThrow("required_date")),
+            employeeNote = c.getString(c.getColumnIndexOrThrow("employee_note")),
+            createdAtMillis = c.getLong(c.getColumnIndexOrThrow("created_at_millis"))
+        ))
+    } }
+
+    fun upsertMoneyRequest(item: MoneyRequest) {
+        writableDatabase.insertWithOnConflict("money_requests", null, ContentValues().apply {
+            put("client_uuid", item.clientUuid)
+            if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
+            put("sync_state", item.syncState.name); put("sync_error", item.syncError)
+            put("requested_cents", item.requestedCents); put("purpose", item.purpose)
+            put("project_site", item.projectSite); put("required_date", item.requiredDate)
+            put("employee_note", item.employeeNote); put("created_at_millis", item.createdAtMillis)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun pendingMoneyRequests(): List<MoneyRequest> = getMoneyRequests().filter {
+        it.syncState == SyncState.PENDING || it.syncState == SyncState.FAILED || it.syncState == SyncState.SYNCING
+    }
+
+    fun markMoneyRequestSyncing(id: String) = updateMoneyRequestSync(id, SyncState.SYNCING, "", null)
+    fun markMoneyRequestFailed(id: String, error: String) = updateMoneyRequestSync(id, SyncState.FAILED, error.take(500), null)
+    fun markMoneyRequestSynced(id: String, serverId: String) = updateMoneyRequestSync(id, SyncState.SYNCED, "", serverId)
+
+    private fun updateMoneyRequestSync(id: String, state: SyncState, error: String, serverId: String?) {
+        writableDatabase.update("money_requests", ContentValues().apply {
+            put("sync_state", state.name); put("sync_error", error)
+            if (serverId != null) put("server_id", serverId)
+        }, "client_uuid=?", arrayOf(id))
     }
 
     fun getAdvances(): List<Advance> = readableDatabase.query(
@@ -380,6 +445,19 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         ))
     } }
 
+    fun replaceCompanyCards(cards: List<CompanyCard>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("company_cards", null, null)
+            cards.forEach { card -> db.insertOrThrow("company_cards", null, ContentValues().apply {
+                put("server_id", card.serverId); put("name", card.name)
+                put("reference", card.reference); put("balance_cents", card.balanceCents)
+            }) }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+
     fun replaceAll(
         advances: List<Advance>,
         slips: List<Slip>,
@@ -463,6 +541,6 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 4
+        private const val DB_VERSION = 5
     }
 }

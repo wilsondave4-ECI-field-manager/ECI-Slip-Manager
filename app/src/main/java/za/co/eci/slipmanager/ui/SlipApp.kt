@@ -72,6 +72,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -91,8 +92,10 @@ import za.co.eci.slipmanager.backup.BackupManager
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.AdvanceReportArchiveStore
 import za.co.eci.slipmanager.data.CompanyCard
+import za.co.eci.slipmanager.data.CompanyCardDetails
 import za.co.eci.slipmanager.data.DocumentNumberStore
 import za.co.eci.slipmanager.data.MoneyReturn
+import za.co.eci.slipmanager.data.MoneyRequest
 import za.co.eci.slipmanager.data.PaymentType
 import za.co.eci.slipmanager.data.PersonalFundsSummary
 import za.co.eci.slipmanager.data.PersonalReportArchiveStore
@@ -111,7 +114,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
-private enum class Screen { HOME, ADVANCES, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
+private enum class Screen { HOME, REQUEST_MONEY, CARDS, ADVANCES, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
 
 @Composable
 private fun ServerLoginScreen(
@@ -181,6 +184,8 @@ fun SlipApp(repository: SlipRepository) {
     val returns by repository.returns.collectAsState()
     val reimbursements by repository.reimbursements.collectAsState()
     val cards by repository.cards.collectAsState()
+    val moneyRequests by repository.moneyRequests.collectAsState()
+    val cardDetails by repository.cardDetails.collectAsState()
     val session by repository.session.collectAsState()
     val serverMessage by repository.serverMessage.collectAsState()
 
@@ -456,6 +461,8 @@ fun SlipApp(repository: SlipRepository) {
             AppTopBar(
                 title = when (screen) {
                     Screen.HOME -> "ECI Slip Manager"
+                    Screen.REQUEST_MONEY -> "Request Money"
+                    Screen.CARDS -> "Company Cards"
                     Screen.ADVANCES -> "Money Received"
                     Screen.SLIPS -> "Slips"
                     Screen.REPORTS -> "Reports & Export"
@@ -468,15 +475,8 @@ fun SlipApp(repository: SlipRepository) {
             )
         },
         bottomBar = {
-            if (screen in setOf(Screen.HOME, Screen.SLIPS, Screen.REPORTS, Screen.ARCHIVE)) {
+            if (screen in setOf(Screen.HOME, Screen.SLIPS, Screen.REQUEST_MONEY, Screen.SETTINGS)) {
                 BottomNav(screen, onNavigate = { screen = it }, onScan = ::startScan)
-            }
-        },
-        floatingActionButton = {
-            if (screen == Screen.HOME) {
-                FloatingActionButton(onClick = ::startScan) {
-                    Icon(Icons.Default.CameraAlt, contentDescription = "Scan slip")
-                }
             }
         }
     ) { padding ->
@@ -489,7 +489,25 @@ fun SlipApp(repository: SlipRepository) {
                     personalSummary = personalSummary,
                     onAdvances = { screen = Screen.ADVANCES },
                     onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
-                    onScan = ::startScan
+                    onScan = ::startScan,
+                    onRequestMoney = { screen = Screen.REQUEST_MONEY },
+                    onCards = { repository.refreshCardDetails(); screen = Screen.CARDS },
+                    onHistory = { screen = Screen.SLIPS },
+                    onReports = { screen = Screen.REPORTS },
+                    onArchive = { screen = Screen.ARCHIVE }
+                )
+                Screen.REQUEST_MONEY -> MoneyRequestScreen(
+                    requests = moneyRequests,
+                    onSave = repository::saveMoneyRequest,
+                    onBack = { screen = Screen.HOME }
+                )
+                Screen.CARDS -> CompanyCardsScreen(
+                    details = cardDetails.copy(cards = if (cardDetails.cards.isEmpty()) cards else cardDetails.cards),
+                    message = serverMessage,
+                    onRefresh = repository::refreshCardDetails,
+                    onRequest = repository::requestCardFunds,
+                    onUpdate = repository::acknowledgeCardUpdate,
+                    onBack = { screen = Screen.HOME }
                 )
                 Screen.ADVANCES -> AdvancesScreen(repository, advances, slips, returns, onDone = { screen = Screen.HOME })
                 Screen.SLIPS -> SlipsScreen(
@@ -603,7 +621,7 @@ private fun AppTopBar(title: String, showSettings: Boolean, onSettings: () -> Un
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            if (title == "ECI Slip Manager") Text("Local • Private • Offline", style = MaterialTheme.typography.labelSmall)
+            if (title == "ECI Slip Manager") Text("Native • Offline-ready • VPS sync", style = MaterialTheme.typography.labelSmall)
         }
         if (showSettings) IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Settings") }
     }
@@ -618,24 +636,24 @@ private fun BottomNav(screen: Screen, onNavigate: (Screen) -> Unit, onScan: () -
             icon = { Icon(Icons.Default.Home, null) }, label = { Text("Home") }
         )
         NavigationBarItem(
+            selected = screen == Screen.SLIPS,
+            onClick = { onNavigate(Screen.SLIPS) },
+            icon = { Icon(Icons.Default.ReceiptLong, null) }, label = { Text("History") }
+        )
+        NavigationBarItem(
             selected = false,
             onClick = onScan,
             icon = { Icon(Icons.Default.CameraAlt, null) }, label = { Text("Scan") }
         )
         NavigationBarItem(
-            selected = screen == Screen.SLIPS,
-            onClick = { onNavigate(Screen.SLIPS) },
-            icon = { Icon(Icons.Default.ReceiptLong, null) }, label = { Text("Slips") }
+            selected = screen == Screen.REQUEST_MONEY,
+            onClick = { onNavigate(Screen.REQUEST_MONEY) },
+            icon = { Icon(Icons.Default.Add, null) }, label = { Text("Requests") }
         )
         NavigationBarItem(
-            selected = screen == Screen.REPORTS,
-            onClick = { onNavigate(Screen.REPORTS) },
-            icon = { Icon(Icons.Default.Description, null) }, label = { Text("Reports") }
-        )
-        NavigationBarItem(
-            selected = screen == Screen.ARCHIVE,
-            onClick = { onNavigate(Screen.ARCHIVE) },
-            icon = { Icon(Icons.Default.Archive, null) }, label = { Text("Archive") }
+            selected = screen == Screen.SETTINGS,
+            onClick = { onNavigate(Screen.SETTINGS) },
+            icon = { Icon(Icons.Default.Settings, null) }, label = { Text("Profile") }
         )
     }
 }
@@ -648,27 +666,20 @@ private fun HomeScreen(
     personalSummary: PersonalFundsSummary,
     onAdvances: () -> Unit,
     onSlip: (Slip) -> Unit,
-    onScan: () -> Unit
+    onScan: () -> Unit,
+    onRequestMoney: () -> Unit,
+    onCards: () -> Unit,
+    onHistory: () -> Unit,
+    onReports: () -> Unit,
+    onArchive: () -> Unit
 ) {
-    val dashboardAdvances = advances.filter { advance ->
-        !advance.archived || repository.reconciliation(advance.id).outstandingCents != 0L
-    }
-    var selectedAdvanceId by remember { mutableStateOf<Long?>(null) }
-    LaunchedEffect(dashboardAdvances) {
-        val newest = dashboardAdvances.firstOrNull { !it.archived }?.id ?: dashboardAdvances.firstOrNull()?.id
-        if (selectedAdvanceId == null || dashboardAdvances.none { it.id == selectedAdvanceId }) selectedAdvanceId = newest
-    }
-    val selectedAdvance = dashboardAdvances.firstOrNull { it.id == selectedAdvanceId }
-    val rec = selectedAdvanceId?.let { repository.reconciliation(it) } ?: repository.activeReconciliation()
-    val activeRec = repository.activeReconciliation()
-    val personal = personalSummary
-    var showReimbursement by remember { mutableStateOf(false) }
-    val activeAdvanceIds = advances.asSequence().filterNot { it.archived }.map { it.id }.toSet()
-    val visibleSlips = when {
-        selectedAdvanceId == null -> slips.filter { it.advanceId != null && it.advanceId in activeAdvanceIds }
-        selectedAdvance?.archived == true -> emptyList()
-        else -> slips.filter { it.advanceId == selectedAdvanceId }
-    }
+    val session by repository.session.collectAsState()
+    val moneyRequests by repository.moneyRequests.collectAsState()
+    val serverMessage by repository.serverMessage.collectAsState()
+    val outstanding = repository.activeReconciliation().outstandingCents.coerceAtLeast(0L)
+    val pendingCount = slips.count { it.syncState != SyncState.SYNCED } +
+        moneyRequests.count { it.syncState != SyncState.SYNCED }
+    val firstName = session?.displayName?.trim()?.substringBefore(' ')?.ifBlank { "Employee" } ?: "Employee"
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -676,98 +687,100 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)) {
-                Column(Modifier.fillMaxWidth().padding(18.dp)) {
-                    Text("ADVANCE BALANCE", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelLarge)
-                    Text(money(rec.outstandingCents), color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-                    selectedAdvance?.let {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "${it.project.ifBlank { "Advance #${it.id}" }} • ${dateText(it.dateEpochDay)}${if (it.archived) " • ARCHIVED" else ""}",
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-            }
+            Text("Welcome, $firstName", style = MaterialTheme.typography.titleMedium)
         }
         item {
-            OutlinedButton(onClick = onAdvances, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                Icon(Icons.Default.Add, null)
-                Spacer(Modifier.width(8.dp))
-                Text("MONEY RECEIVED / ADVANCES", fontWeight = FontWeight.Bold)
+            DashboardBalanceCard("Company money outstanding", money(outstanding), Color(0xFFEFFAF2), Color(0xFF07883F), onAdvances)
+        }
+        item {
+            DashboardBalanceCard("Refunds owed to you", money(personalSummary.outstandingCents), Color(0xFFFFF1F1), Color(0xFFC9232B), onHistory)
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                EmployeeActionCard("Request Money", "Ask for company funds", Color(0xFF119447), Modifier.weight(1f), onRequestMoney)
+                EmployeeActionCard("Capture Slip", "Submit a receipt or invoice", Color(0xFF0B67B7), Modifier.weight(1f), onScan)
             }
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MiniTotal("Received", activeRec.receivedCents, Modifier.weight(1f))
-                MiniTotal("Slips", activeRec.slipsCents, Modifier.weight(1f))
+                EmployeeActionCard("Request Refund", "Get reimbursed for own expenses", Color(0xFFEA7100), Modifier.weight(1f), onHistory)
+                EmployeeActionCard("My Balance / History", "View your transactions", Color(0xFF7A42C3), Modifier.weight(1f), onHistory)
             }
         }
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MiniTotal("Returned", activeRec.returnedCents, Modifier.weight(1f))
-                MiniTotal("Slips", visibleSlips.size.toLong(), Modifier.weight(1f), asCount = true)
+            Row(Modifier.fillMaxWidth()) {
+                EmployeeActionCard("Company Cards", "Balance, funding and assignments", Color(0xFF1769AA), Modifier.fillMaxWidth(0.5f), onCards)
             }
         }
         item {
-            Card {
-                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("MY OWN MONEY", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                    Text("Used ${money(personal.usedCents)}")
-                    Text("Reimbursed ${money(personal.reimbursedCents)}")
-                    Text("ECI owes me ${money(personal.outstandingCents)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    if (personal.outstandingCents > 0L) {
-                        OutlinedButton(onClick = { showReimbursement = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text("RECORD REIMBURSEMENT")
-                        }
-                    }
+            Card(colors = CardDefaults.cardColors(containerColor = if (pendingCount == 0) Color(0xFFEFFAF2) else Color(0xFFFFF8E7))) {
+                Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (pendingCount == 0) "All activity synced" else "$pendingCount waiting to sync", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    if (pendingCount > 0) TextButton(onClick = repository::syncNow) { Text("Sync now") }
                 }
             }
         }
-        item {
-            Button(onClick = onScan, modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                Icon(Icons.Default.CameraAlt, null)
-                Spacer(Modifier.width(10.dp))
-                Text("SCAN SLIP", fontWeight = FontWeight.Bold)
-            }
+        if (serverMessage.isNotBlank() && serverMessage.contains("Offline", ignoreCase = true)) {
+            item { Text(serverMessage, style = MaterialTheme.typography.bodySmall) }
         }
-        if (dashboardAdvances.isEmpty()) item { InfoCard("Start here", "Add the money paid into your account, then scan slips against it.") }
-
-        val incomplete = visibleSlips.filterNot { it.isComplete }.take(5)
-        if (incomplete.isNotEmpty()) {
-            item { SectionTitle("Needs attention") }
-            items(incomplete, key = { it.id }) { slip -> SlipCard(slip, onSlip) }
-        }
-
-        if (dashboardAdvances.isNotEmpty()) {
-            item { SectionTitle("Loaded advances") }
-            item {
-                AdvanceSelectorRow(
-                    advances = dashboardAdvances,
-                    selectedId = selectedAdvanceId,
-                    onSelected = { selectedAdvanceId = it }
-                )
-            }
-        }
-
-        item { SectionTitle("Recent slips") }
-        if (visibleSlips.isEmpty()) {
-            item { InfoCard("No slips for this advance", "Scan a slip and it will be allocated to the newest advance by default.") }
+        item { SectionTitle("Recent Activity") }
+        val recentSlips = slips.sortedByDescending { it.createdAtMillis }.take(3)
+        val recentRequests = moneyRequests.sortedByDescending { it.createdAtMillis }.take(2)
+        if (recentSlips.isEmpty() && recentRequests.isEmpty()) {
+            item { InfoCard("No recent activity", "Your receipts, requests and refunds will appear here.") }
         } else {
-            items(visibleSlips.take(8), key = { it.id }) { slip -> SlipCard(slip, onSlip) }
+            items(recentRequests, key = { it.clientUuid }) { request ->
+                Card(Modifier.fillMaxWidth().clickable(onClick = onRequestMoney)) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("Money request", fontWeight = FontWeight.Bold)
+                        Text("${request.purpose} • ${money(request.requestedCents)}")
+                        Text(syncLabel(request.syncState), style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+            items(recentSlips, key = { it.id }) { slip -> SlipCard(slip, onSlip) }
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onReports, modifier = Modifier.weight(1f)) { Text("Reports") }
+                OutlinedButton(onClick = onArchive, modifier = Modifier.weight(1f)) { Text("Archive") }
+            }
         }
     }
+}
 
-    if (showReimbursement) {
-        ReimbursementDialog(
-            maxOutstandingCents = personal.outstandingCents,
-            onDismiss = { showReimbursement = false }
-        ) { item ->
-            repository.saveReimbursement(item)
-            showReimbursement = false
+@Composable
+private fun DashboardBalanceCard(label: String, value: String, background: Color, accent: Color, onClick: () -> Unit) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), colors = CardDefaults.cardColors(containerColor = background)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp)) {
+            Text(label, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(value, color = accent, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
     }
+}
+
+@Composable
+private fun EmployeeActionCard(title: String, subtitle: String, accent: Color, modifier: Modifier, onClick: () -> Unit) {
+    Card(modifier.clickable(onClick = onClick)) {
+        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(38.dp).background(accent, RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Add, null, tint = Color.White)
+            }
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                Text(subtitle, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+private fun syncLabel(state: SyncState): String = when (state) {
+    SyncState.SYNCED -> "Synced"
+    SyncState.SYNCING -> "Syncing"
+    SyncState.FAILED -> "Waiting to retry"
+    SyncState.PENDING, SyncState.LOCAL_ONLY -> "Waiting to sync"
 }
 
 @Composable
@@ -813,6 +826,168 @@ private fun InfoCard(title: String, body: String) {
 
 @Composable
 private fun SectionTitle(text: String) = Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+@Composable
+private fun MoneyRequestScreen(
+    requests: List<MoneyRequest>,
+    onSave: (MoneyRequest) -> Unit,
+    onBack: () -> Unit
+) {
+    var amount by remember { mutableStateOf("") }
+    var purpose by remember { mutableStateOf("") }
+    var projectSite by remember { mutableStateOf("") }
+    var requiredDate by remember { mutableStateOf(LocalDate.now().toString()) }
+    var note by remember { mutableStateOf("") }
+    val cents = parseMoney(amount)
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("Ask for company funds", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Requests are saved on this phone first and sent automatically when there is a connection.")
+        }
+        item { MoneyField("Amount (R)", amount, { amount = it }, cents == null && amount.isNotBlank()) }
+        item { TextFieldSimple("Purpose", purpose, { purpose = it }) }
+        item { TextFieldSimple("Project / site (manual entry)", projectSite, { projectSite = it }) }
+        item { DateField(requiredDate, { requiredDate = it }) }
+        item { TextFieldSimple("Additional note (optional)", note, { note = it }) }
+        item {
+            Button(
+                onClick = {
+                    onSave(
+                        MoneyRequest(
+                            requestedCents = cents ?: 0L,
+                            purpose = purpose.trim(),
+                            projectSite = projectSite.trim(),
+                            requiredDate = requiredDate,
+                            employeeNote = note.trim()
+                        )
+                    )
+                    amount = ""; purpose = ""; projectSite = ""; note = ""
+                },
+                enabled = cents != null && cents > 0L && purpose.isNotBlank() && projectSite.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().height(52.dp)
+            ) { Text("Send money request", fontWeight = FontWeight.Bold) }
+        }
+        item { OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to home") } }
+        item { SectionTitle("My requests") }
+        if (requests.isEmpty()) item { InfoCard("No requests yet", "Your money requests will appear here.") }
+        items(requests.sortedByDescending { it.createdAtMillis }, key = { it.clientUuid }) { request ->
+            Card {
+                Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(request.purpose, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text(money(request.requestedCents), fontWeight = FontWeight.Bold)
+                    }
+                    Text(request.projectSite)
+                    Text("Needed ${request.requiredDate} • ${syncLabel(request.syncState)}", style = MaterialTheme.typography.labelSmall)
+                    if (request.syncError.isNotBlank()) Text(request.syncError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompanyCardsScreen(
+    details: CompanyCardDetails,
+    message: String,
+    onRefresh: () -> Unit,
+    onRequest: (String, Long, String) -> Unit,
+    onUpdate: (String, Boolean) -> Unit,
+    onBack: () -> Unit
+) {
+    var selectedCardId by remember(details.cards) { mutableStateOf(details.cards.firstOrNull()?.serverId) }
+    var amount by remember { mutableStateOf("") }
+    var purpose by remember { mutableStateOf("") }
+    val cents = parseMoney(amount)
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Company Cards", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("See the assigned card balance and request funds when needed.")
+                }
+                TextButton(onClick = onRefresh) { Text("Refresh") }
+            }
+        }
+        if (details.cards.isEmpty()) {
+            item { InfoCard("No card assigned", "An accountant or administrator must assign a company card to you.") }
+        } else {
+            items(details.cards, key = { it.serverId }) { card ->
+                Card(
+                    Modifier.fillMaxWidth().clickable { selectedCardId = card.serverId },
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (selectedCardId == card.serverId) Color(0xFFEAF4FF) else MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(card.name, fontWeight = FontWeight.Bold)
+                            if (card.reference.isNotBlank()) Text(card.reference, style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text(money(card.balanceCents), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF0B67B7))
+                    }
+                }
+            }
+            item { SectionTitle("Request money for selected card") }
+            item { MoneyField("Amount (R)", amount, { amount = it }, cents == null && amount.isNotBlank()) }
+            item { TextFieldSimple("Reason / purchase purpose", purpose, { purpose = it }) }
+            item {
+                Button(
+                    onClick = {
+                        selectedCardId?.let { onRequest(it, cents ?: 0L, purpose.trim()) }
+                        amount = ""; purpose = ""
+                    },
+                    enabled = selectedCardId != null && cents != null && cents > 0L && purpose.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Send card funding request") }
+                Text("A connection is required to submit a company-card funding request.", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (message.isNotBlank()) item { Text(message, color = MaterialTheme.colorScheme.primary) }
+        if (details.updates.isNotEmpty()) {
+            item { SectionTitle("Slip updates requested") }
+            items(details.updates, key = { "update-${it.id}" }) { update ->
+                Card {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(update.cardName, fontWeight = FontWeight.Bold)
+                        if (update.message.isNotBlank()) Text(update.message)
+                        update.bankBalanceCents?.let { Text("Bank balance reported: ${money(it)}") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { onUpdate(update.id, false) }) { Text("Acknowledge") }
+                            Button(onClick = { onUpdate(update.id, true) }) { Text("Slips updated") }
+                        }
+                    }
+                }
+            }
+        }
+        if (details.requests.isNotEmpty()) {
+            item { SectionTitle("Card funding history") }
+            items(details.requests, key = { "request-${it.id}" }) { request ->
+                Card {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        Row(Modifier.fillMaxWidth()) {
+                            Text(request.cardName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text(money(request.requestedCents), fontWeight = FontWeight.Bold)
+                        }
+                        Text(request.purpose)
+                        Text(request.status, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+        item { OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to home") } }
+    }
+}
 
 @Composable
 private fun AdvancesScreen(

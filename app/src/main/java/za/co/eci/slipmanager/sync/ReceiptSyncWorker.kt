@@ -22,6 +22,18 @@ class ReceiptSyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         val db = SlipDatabase(applicationContext)
         val api = ExpenseApi()
         try {
+            for (request in db.pendingMoneyRequests().sortedBy { it.createdAtMillis }) {
+                db.markMoneyRequestSyncing(request.clientUuid)
+                try {
+                    db.markMoneyRequestSynced(request.clientUuid, api.uploadMoneyRequest(session, request))
+                } catch (error: ApiException) {
+                    db.markMoneyRequestFailed(request.clientUuid, error.message ?: "Server rejected request")
+                    if (error.status == 401 || error.status >= 500) return@withContext Result.retry()
+                } catch (error: Exception) {
+                    db.markMoneyRequestFailed(request.clientUuid, error.message ?: "Connection failed")
+                    return@withContext Result.retry()
+                }
+            }
             for (slip in db.pendingSlips().sortedBy { it.createdAtMillis }) {
                 if (!slip.isComplete || slip.clientUuid.isBlank()) continue
                 if ((slip.paymentType == PaymentType.ADVANCE || slip.paymentType == PaymentType.SPLIT) && slip.serverAdvanceId.isNullOrBlank()) {

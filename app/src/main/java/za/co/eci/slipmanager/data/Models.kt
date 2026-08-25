@@ -55,6 +55,45 @@ data class CompanyCard(
     val balanceCents: Long = 0L
 )
 
+data class MoneyRequest(
+    val clientUuid: String = UUID.randomUUID().toString(),
+    val serverId: String? = null,
+    val syncState: SyncState = SyncState.PENDING,
+    val syncError: String = "",
+    val requestedCents: Long,
+    val purpose: String,
+    val projectSite: String = "",
+    val requiredDate: String = "",
+    val employeeNote: String = "",
+    val createdAtMillis: Long = System.currentTimeMillis()
+)
+
+data class CompanyCardFundingRequest(
+    val id: String,
+    val cardId: String,
+    val cardName: String,
+    val requestedCents: Long,
+    val approvedCents: Long? = null,
+    val purpose: String,
+    val status: String,
+    val submittedAt: String
+)
+
+data class CompanyCardUpdateRequest(
+    val id: String,
+    val cardName: String,
+    val bankBalanceCents: Long? = null,
+    val message: String = "",
+    val requestedAt: String,
+    val acknowledged: Boolean = false
+)
+
+data class CompanyCardDetails(
+    val cards: List<CompanyCard> = emptyList(),
+    val requests: List<CompanyCardFundingRequest> = emptyList(),
+    val updates: List<CompanyCardUpdateRequest> = emptyList()
+)
+
 data class ServerSession(
     val cookie: String,
     val userId: String,

@@ -34,6 +34,12 @@ class SlipRepository(context: Context) {
     private val _cards = MutableStateFlow<List<CompanyCard>>(emptyList())
     val cards: StateFlow<List<CompanyCard>> = _cards.asStateFlow()
 
+    private val _moneyRequests = MutableStateFlow<List<MoneyRequest>>(emptyList())
+    val moneyRequests: StateFlow<List<MoneyRequest>> = _moneyRequests.asStateFlow()
+
+    private val _cardDetails = MutableStateFlow(CompanyCardDetails())
+    val cardDetails: StateFlow<CompanyCardDetails> = _cardDetails.asStateFlow()
+
     private val _session = MutableStateFlow(sessions.load())
     val session: StateFlow<ServerSession?> = _session.asStateFlow()
 
@@ -52,6 +58,7 @@ class SlipRepository(context: Context) {
         _returns.value = db.getReturns()
         _reimbursements.value = db.getReimbursements()
         _cards.value = db.getCompanyCards()
+        _moneyRequests.value = db.getMoneyRequests()
     }
 
     fun saveAdvance(item: Advance): Long = db.upsertAdvance(item).also { refresh() }
@@ -67,6 +74,12 @@ class SlipRepository(context: Context) {
     }
     fun saveReturn(item: MoneyReturn): Long = db.upsertReturn(item).also { refresh() }
     fun saveReimbursement(item: Reimbursement): Long = db.upsertReimbursement(item).also { refresh() }
+
+    fun saveMoneyRequest(item: MoneyRequest) {
+        db.upsertMoneyRequest(item); refresh()
+        _serverMessage.value = "Money request saved safely on this phone"
+        ReceiptSyncWorker.request(appContext)
+    }
 
     fun signIn(email: String, password: String) {
         _serverMessage.value = "Signing in…"
@@ -118,6 +131,7 @@ class SlipRepository(context: Context) {
                     refresh()
                     _serverMessage.value = "Advances and cards are up to date"
                     ReceiptSyncWorker.request(appContext)
+                    refreshCardDetails()
                 }
                 .onFailure { _serverMessage.value = "Offline — saved phone data is still available" }
         }
@@ -126,6 +140,40 @@ class SlipRepository(context: Context) {
     fun syncNow() {
         _serverMessage.value = "Sync queued — it will send when connected"
         ReceiptSyncWorker.request(appContext)
+    }
+
+    fun refreshCardDetails() {
+        val current = _session.value ?: return
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { ExpenseApi().companyCardDetails(current) } }
+                .onSuccess { details ->
+                    _cardDetails.value = details
+                    withContext(Dispatchers.IO) { db.replaceCompanyCards(details.cards) }
+                    refresh()
+                    _serverMessage.value = "Company cards are up to date"
+                }
+                .onFailure { _serverMessage.value = "Offline — showing the last saved card balances" }
+        }
+    }
+
+    fun requestCardFunds(cardId: String, amountCents: Long, purpose: String) {
+        val current = _session.value ?: return
+        _serverMessage.value = "Sending card funding request…"
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { ExpenseApi().requestCardFunds(current, cardId, amountCents, purpose) } }
+                .onSuccess { _serverMessage.value = "Card funding request sent"; refreshCardDetails() }
+                .onFailure { _serverMessage.value = it.message ?: "Card funding request failed" }
+        }
+    }
+
+    fun acknowledgeCardUpdate(id: String, complete: Boolean) {
+        val current = _session.value ?: return
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) {
+                if (complete) ExpenseApi().resolveCardUpdate(current, id) else ExpenseApi().acknowledgeCardUpdate(current, id)
+            } }.onSuccess { _serverMessage.value = if (complete) "Card slips marked up to date" else "Update acknowledged"; refreshCardDetails() }
+                .onFailure { _serverMessage.value = it.message ?: "Could not update the request" }
+        }
     }
 
     fun archiveAdvance(item: Advance, archived: Boolean) {

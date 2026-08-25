@@ -10,6 +10,10 @@ import org.json.JSONObject
 import za.co.eci.slipmanager.BuildConfig
 import za.co.eci.slipmanager.data.Advance
 import za.co.eci.slipmanager.data.CompanyCard
+import za.co.eci.slipmanager.data.CompanyCardDetails
+import za.co.eci.slipmanager.data.CompanyCardFundingRequest
+import za.co.eci.slipmanager.data.CompanyCardUpdateRequest
+import za.co.eci.slipmanager.data.MoneyRequest
 import za.co.eci.slipmanager.data.PaymentType
 import za.co.eci.slipmanager.data.ServerSession
 import za.co.eci.slipmanager.data.Slip
@@ -128,6 +132,77 @@ class ExpenseApi {
             val result = JSONObject(payload)
             if (!result.optBoolean("documentStored")) throw ApiException(502, "The server did not confirm receipt storage")
             return result.getString("serverId")
+        }
+    }
+
+    fun uploadMoneyRequest(session: ServerSession, item: MoneyRequest): String {
+        val body = JSONObject()
+            .put("clientUuid", item.clientUuid).put("projectId", JSONObject.NULL)
+            .put("projectSite", nullableText(item.projectSite))
+            .put("requestedCents", item.requestedCents)
+            .put("requiredDate", nullableText(item.requiredDate))
+            .put("purpose", item.purpose).put("employeeNote", nullableText(item.employeeNote))
+        val request = authorized(session, "$base/sync/money-request")
+            .header("Idempotency-Key", item.clientUuid).post(body.toString().toRequestBody(jsonType)).build()
+        client.newCall(request).execute().use { response ->
+            val payload = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(response.code, errorMessage(payload, "Money request sync failed"))
+            return JSONObject(payload).getString("serverId")
+        }
+    }
+
+    fun companyCardDetails(session: ServerSession): CompanyCardDetails {
+        val request = authorized(session, "$base/employee/company-cards").get().build()
+        client.newCall(request).execute().use { response ->
+            val payload = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(response.code, errorMessage(payload, "Could not load company cards"))
+            val root = JSONObject(payload)
+            val cardsJson = root.optJSONArray("cards")
+            val cards = buildList {
+                if (cardsJson != null) for (i in 0 until cardsJson.length()) cardsJson.getJSONObject(i).let { o -> add(CompanyCard(
+                    serverId = o.getString("id"), name = o.getString("name"),
+                    reference = optionalString(o, "card_reference"),
+                    balanceCents = o.optString("balance_cents", "0").toLongOrNull() ?: 0L
+                )) }
+            }
+            val requestsJson = root.optJSONArray("requests")
+            val requests = buildList {
+                if (requestsJson != null) for (i in 0 until requestsJson.length()) requestsJson.getJSONObject(i).let { o -> add(CompanyCardFundingRequest(
+                    id = o.getString("id"), cardId = o.getString("card_id"), cardName = o.getString("card_name"),
+                    requestedCents = o.optString("requested_cents", "0").toLongOrNull() ?: 0L,
+                    approvedCents = optionalString(o, "approved_cents").toLongOrNull(),
+                    purpose = o.getString("purpose"), status = o.getString("status"), submittedAt = o.getString("submitted_at")
+                )) }
+            }
+            val updatesJson = root.optJSONArray("updateRequests")
+            val updates = buildList {
+                if (updatesJson != null) for (i in 0 until updatesJson.length()) updatesJson.getJSONObject(i).let { o -> add(CompanyCardUpdateRequest(
+                    id = o.getString("id"), cardName = o.getString("card_name"),
+                    bankBalanceCents = optionalString(o, "bank_balance_cents").toLongOrNull(),
+                    message = optionalString(o, "message"), requestedAt = o.getString("requested_at"),
+                    acknowledged = !o.isNull("acknowledged_at")
+                )) }
+            }
+            return CompanyCardDetails(cards, requests, updates)
+        }
+    }
+
+    fun requestCardFunds(session: ServerSession, cardId: String, amountCents: Long, purpose: String) {
+        val body = JSONObject().put("cardId", cardId).put("requestedCents", amountCents).put("purpose", purpose)
+        postAuthorized(session, "$base/employee/company-cards/requests", body, "Card funding request failed")
+    }
+
+    fun acknowledgeCardUpdate(session: ServerSession, id: String) =
+        postAuthorized(session, "$base/employee/company-cards/update-requests/$id/acknowledge", JSONObject(), "Could not acknowledge update")
+
+    fun resolveCardUpdate(session: ServerSession, id: String) =
+        postAuthorized(session, "$base/employee/company-cards/update-requests/$id/resolve", JSONObject(), "Could not complete update")
+
+    private fun postAuthorized(session: ServerSession, url: String, body: JSONObject, fallback: String) {
+        val request = authorized(session, url).post(body.toString().toRequestBody(jsonType)).build()
+        client.newCall(request).execute().use { response ->
+            val payload = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(response.code, errorMessage(payload, fallback))
         }
     }
 
