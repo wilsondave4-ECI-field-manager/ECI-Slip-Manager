@@ -15,13 +15,19 @@ import za.co.eci.slipmanager.data.CompanyCardFundingRequest
 import za.co.eci.slipmanager.data.CompanyCardUpdateRequest
 import za.co.eci.slipmanager.data.MoneyRequest
 import za.co.eci.slipmanager.data.PaymentType
+import za.co.eci.slipmanager.data.Refund
 import za.co.eci.slipmanager.data.ServerSession
 import za.co.eci.slipmanager.data.Slip
 import java.io.File
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
-data class ServerFunding(val advances: List<Advance>, val cards: List<CompanyCard>)
+data class ServerFunding(
+    val advances: List<Advance>,
+    val cards: List<CompanyCard>,
+    val refunds: List<Refund>,
+    val moneyRequests: List<MoneyRequest>
+)
 class ApiException(val status: Int, message: String) : Exception(message)
 
 class ExpenseApi {
@@ -80,10 +86,13 @@ class ExpenseApi {
                     add(Advance(
                         serverId = o.getString("id"),
                         dateEpochDay = date.toEpochDay(),
-                        amountCents = o.optString("remaining_cents", "0").toLongOrNull() ?: 0L,
+                        amountCents = o.optString("amount_cents", "0").toLongOrNull() ?: 0L,
+                        remainingCents = o.optString("remaining_cents", "0").toLongOrNull() ?: 0L,
                         reference = optionalString(o, "payment_reference"),
                         project = optionalString(o, "project_name").ifBlank { optionalString(o, "project_site") },
-                        notes = "Available balance synced from ${session.companyName}"
+                        notes = optionalString(o, "accountant_note"),
+                        status = optionalString(o, "status").ifBlank { "OPEN" },
+                        archived = !listOf("OPEN", "REOPENED").contains(optionalString(o, "status"))
                     ))
                 }
             }
@@ -98,8 +107,72 @@ class ExpenseApi {
                     ))
                 }
             }
-            return ServerFunding(advances, cards)
+            val refundsJson = activity.optJSONArray("refunds")
+            val refunds = buildList {
+                if (refundsJson != null) for (i in 0 until refundsJson.length()) {
+                    val o = refundsJson.getJSONObject(i)
+                    add(Refund(
+                        serverId = o.getString("id"),
+                        status = optionalString(o, "status"),
+                        openedAt = optionalString(o, "opened_at"),
+                        settledAt = optionalString(o, "settled_at"),
+                        totalCents = o.optString("total_cents", "0").toLongOrNull() ?: 0L,
+                        approvedCents = o.optString("approved_cents", "0").toLongOrNull() ?: 0L,
+                        pendingCents = o.optString("pending_cents", "0").toLongOrNull() ?: 0L,
+                        reimbursedCents = o.optString("reimbursed_cents", "0").toLongOrNull() ?: 0L,
+                        outstandingCents = o.optString("outstanding_cents", "0").toLongOrNull() ?: 0L,
+                        accountantViewedAt = optionalString(o, "accountant_viewed_at"),
+                        accountantViewedByName = optionalString(o, "accountant_viewed_by_name"),
+                        updateRequestedAt = optionalString(o, "employee_update_requested_at"),
+                        lastReimbursedDate = optionalString(o, "last_reimbursed_date"),
+                        lastReimbursementReference = optionalString(o, "last_reimbursement_reference")
+                    ))
+                }
+            }
+            val requestsJson = activity.optJSONArray("moneyRequests")
+            val requests = buildList {
+                if (requestsJson != null) for (i in 0 until requestsJson.length()) {
+                    val o = requestsJson.getJSONObject(i)
+                    val submittedAt = optionalString(o, "submitted_at")
+                    add(MoneyRequest(
+                        clientUuid = optionalString(o, "client_uuid").ifBlank { o.getString("id") },
+                        serverId = o.getString("id"),
+                        syncState = za.co.eci.slipmanager.data.SyncState.SYNCED,
+                        requestedCents = o.optString("requested_cents", "0").toLongOrNull() ?: 0L,
+                        approvedCents = optionalString(o, "approved_cents").toLongOrNull(),
+                        purpose = optionalString(o, "purpose"),
+                        projectSite = optionalString(o, "project_name").ifBlank { optionalString(o, "project_site") },
+                        requiredDate = optionalString(o, "required_date"),
+                        employeeNote = optionalString(o, "employee_note"),
+                        accountantNote = optionalString(o, "accountant_note"),
+                        status = optionalString(o, "status"),
+                        employeeReportedPaidAt = optionalString(o, "employee_reported_paid_at"),
+                        employeeReportedPaidCents = optionalString(o, "employee_reported_paid_cents").toLongOrNull(),
+                        employeeReportedPaidDate = optionalString(o, "employee_reported_paid_date"),
+                        employeeReportedPaymentReference = optionalString(o, "employee_reported_payment_reference"),
+                        employeeReportedPaymentNote = optionalString(o, "employee_reported_payment_note"),
+                        createdAtMillis = runCatching { java.time.Instant.parse(submittedAt).toEpochMilli() }.getOrDefault(0L)
+                    ))
+                }
+            }
+            return ServerFunding(advances, cards, refunds, requests)
         }
+    }
+
+    fun requestRefundUpdate(session: ServerSession, refundId: String) =
+        postAuthorized(session, "$base/employee/refunds/$refundId/request-update", JSONObject(), "Could not request refund update")
+
+    fun reportPaymentReceived(
+        session: ServerSession,
+        requestId: String,
+        amountCents: Long,
+        date: String,
+        reference: String,
+        note: String
+    ) {
+        val body = JSONObject().put("amountCents", amountCents).put("date", date)
+            .put("reference", reference).put("note", nullableText(note))
+        postAuthorized(session, "$base/employee/money-requests/$requestId/payment-received", body, "Could not report the payment")
     }
 
     fun uploadReceipt(session: ServerSession, slip: Slip): String {
