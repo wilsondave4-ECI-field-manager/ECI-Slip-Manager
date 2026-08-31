@@ -1036,7 +1036,7 @@ private fun MyRefundsScreen(
             val updateWaiting = refund.updateRequestedAt.isNotBlank() &&
                 (refund.accountantViewedAt.isBlank() || refund.updateRequestedAt > refund.accountantViewedAt)
             val label = when {
-                refund.status == "SETTLED" && refund.outstandingCents == 0L -> "Refunded"
+                refund.reimbursedCents > 0L && refund.outstandingCents == 0L && refund.pendingCents == 0L -> "Refunded"
                 refund.reimbursedCents > 0L && refund.outstandingCents > 0L -> "Partly refunded"
                 refund.pendingCents > 0L -> "Awaiting slip review"
                 refund.accountantViewedAt.isNotBlank() -> "Viewed by accountant/admin"
