@@ -31,6 +31,9 @@ class SlipRepository(context: Context) {
     private val _reimbursements = MutableStateFlow<List<Reimbursement>>(emptyList())
     val reimbursements: StateFlow<List<Reimbursement>> = _reimbursements.asStateFlow()
 
+    private val _refunds = MutableStateFlow<List<Refund>>(emptyList())
+    val refunds: StateFlow<List<Refund>> = _refunds.asStateFlow()
+
     private val _cards = MutableStateFlow<List<CompanyCard>>(emptyList())
     val cards: StateFlow<List<CompanyCard>> = _cards.asStateFlow()
 
@@ -57,6 +60,7 @@ class SlipRepository(context: Context) {
         _slips.value = db.getSlips()
         _returns.value = db.getReturns()
         _reimbursements.value = db.getReimbursements()
+        _refunds.value = db.getRefunds()
         _cards.value = db.getCompanyCards()
         _moneyRequests.value = db.getMoneyRequests()
     }
@@ -127,7 +131,9 @@ class SlipRepository(context: Context) {
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { ExpenseApi().funding(current) } }
                 .onSuccess { funding ->
-                    withContext(Dispatchers.IO) { db.replaceServerAdvances(funding.advances) }
+                    withContext(Dispatchers.IO) {
+                        db.replaceServerActivity(funding.advances, funding.cards, funding.refunds, funding.moneyRequests)
+                    }
                     refresh()
                     _serverMessage.value = "Connected — advances and cards are up to date"
                     ReceiptSyncWorker.request(appContext)
@@ -143,6 +149,34 @@ class SlipRepository(context: Context) {
                         else -> "Could not reach the VPS: ${error.message ?: "connection failed"}"
                     }
                 }
+        }
+    }
+
+    fun requestRefundUpdate(refundId: String) {
+        val current = _session.value ?: return
+        _serverMessage.value = "Requesting refund update…"
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { ExpenseApi().requestRefundUpdate(current, refundId) } }
+                .onSuccess {
+                    _serverMessage.value = "Refund update requested"
+                    refreshFunding()
+                }
+                .onFailure { _serverMessage.value = it.message ?: "Could not request refund update" }
+        }
+    }
+
+    fun reportPaymentReceived(requestId: String, amountCents: Long, date: String, reference: String, note: String) {
+        val current = _session.value ?: return
+        _serverMessage.value = "Reporting the missing payment…"
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    ExpenseApi().reportPaymentReceived(current, requestId, amountCents, date, reference, note)
+                }
+            }.onSuccess {
+                _serverMessage.value = "Payment reported to the accountant/admin"
+                refreshFunding()
+            }.onFailure { _serverMessage.value = it.message ?: "Could not report the payment" }
         }
     }
 
@@ -215,6 +249,8 @@ class SlipRepository(context: Context) {
     fun reconciliation(advanceId: Long? = null): Reconciliation {
         val selectedAdvances = _advances.value.filter { advanceId == null || it.id == advanceId }
         val selectedIds = selectedAdvances.map { it.id }.toSet()
+        val localAdvances = selectedAdvances.filter { it.serverId == null }
+        val serverAdvances = selectedAdvances.filter { it.serverId != null }
         val selectedSlips = _slips.value.filter { slip ->
             if (advanceId == null) slip.advanceId != null && slip.advanceId in selectedIds
             else slip.advanceId == advanceId
@@ -222,20 +258,27 @@ class SlipRepository(context: Context) {
         val selectedReturns = _returns.value.filter { item ->
             if (advanceId == null) item.advanceId in selectedIds else item.advanceId == advanceId
         }
+        val serverPending = _slips.value.filter { slip ->
+            slip.syncState != SyncState.SYNCED && serverAdvances.any { it.serverId == slip.serverAdvanceId }
+        }.sumOf { it.companyPaidCents }
+        val serverUsed = serverAdvances.sumOf { (it.amountCents - it.remainingCents).coerceAtLeast(0L) }
         return Reconciliation(
             receivedCents = selectedAdvances.sumOf { it.amountCents },
-            slipsCents = selectedSlips.sumOf { it.companyPaidCents },
-            returnedCents = selectedReturns.sumOf { it.amountCents }
+            slipsCents = localAdvances.let { locals -> selectedSlips.filter { slip -> locals.any { it.id == slip.advanceId } }.sumOf { it.companyPaidCents } } + serverUsed + serverPending,
+            returnedCents = selectedReturns.filter { item -> localAdvances.any { it.id == item.advanceId } }.sumOf { it.amountCents }
         )
     }
 
     fun activeReconciliation(): Reconciliation {
-        val activeIds = _advances.value.filterNot { it.archived }.map { it.id }.toSet()
-        return Reconciliation(
-            receivedCents = _advances.value.filterNot { it.archived }.sumOf { it.amountCents },
-            slipsCents = _slips.value.filter { it.advanceId != null && it.advanceId in activeIds }.sumOf { it.companyPaidCents },
-            returnedCents = _returns.value.filter { it.advanceId in activeIds }.sumOf { it.amountCents }
-        )
+        val active = _advances.value.filter { !it.archived && it.status in listOf("OPEN", "REOPENED") }
+        val ids = active.map { it.id }.toSet()
+        val serverIds = active.mapNotNull { it.serverId }.toSet()
+        val received = active.sumOf { it.amountCents }
+        val serverUsed = active.filter { it.serverId != null }.sumOf { (it.amountCents - it.remainingCents).coerceAtLeast(0L) }
+        val pendingServer = _slips.value.filter { it.syncState != SyncState.SYNCED && it.serverAdvanceId in serverIds }.sumOf { it.companyPaidCents }
+        val localSpent = _slips.value.filter { it.advanceId in ids && it.serverAdvanceId == null }.sumOf { it.companyPaidCents }
+        val localReturns = _returns.value.filter { returnItem -> active.any { it.serverId == null && it.id == returnItem.advanceId } }.sumOf { it.amountCents }
+        return Reconciliation(received, serverUsed + pendingServer + localSpent, localReturns)
     }
 
     fun personalFundsSummary(): PersonalFundsSummary = PersonalFundsSummary(

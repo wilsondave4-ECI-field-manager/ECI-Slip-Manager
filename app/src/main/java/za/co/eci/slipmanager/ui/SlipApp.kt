@@ -100,6 +100,7 @@ import za.co.eci.slipmanager.data.PaymentType
 import za.co.eci.slipmanager.data.PersonalFundsSummary
 import za.co.eci.slipmanager.data.PersonalReportArchiveStore
 import za.co.eci.slipmanager.data.Reimbursement
+import za.co.eci.slipmanager.data.Refund
 import za.co.eci.slipmanager.data.Slip
 import za.co.eci.slipmanager.data.SlipRepository
 import za.co.eci.slipmanager.data.SyncState
@@ -110,11 +111,13 @@ import za.co.eci.slipmanager.pdf.PdfExporter
 import java.io.File
 import java.text.NumberFormat
 import java.time.LocalDate
+import java.time.Instant
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
-private enum class Screen { HOME, REQUEST_MONEY, CARDS, ADVANCES, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
+private enum class Screen { HOME, REQUEST_MONEY, CARDS, REFUNDS, BALANCE_HISTORY, MISSING_PAYMENT, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
 
 @Composable
 private fun ServerLoginScreen(
@@ -183,6 +186,7 @@ fun SlipApp(repository: SlipRepository) {
     val slips by repository.slips.collectAsState()
     val returns by repository.returns.collectAsState()
     val reimbursements by repository.reimbursements.collectAsState()
+    val refunds by repository.refunds.collectAsState()
     val cards by repository.cards.collectAsState()
     val moneyRequests by repository.moneyRequests.collectAsState()
     val cardDetails by repository.cardDetails.collectAsState()
@@ -463,7 +467,9 @@ fun SlipApp(repository: SlipRepository) {
                     Screen.HOME -> "ECI Slip Manager"
                     Screen.REQUEST_MONEY -> "Request Money"
                     Screen.CARDS -> "Company Cards"
-                    Screen.ADVANCES -> "Money Received"
+                    Screen.REFUNDS -> "My Refunds"
+                    Screen.BALANCE_HISTORY -> "My Balance / History"
+                    Screen.MISSING_PAYMENT -> "Payment Missing"
                     Screen.SLIPS -> "Slips"
                     Screen.REPORTS -> "Reports & Export"
                     Screen.ARCHIVE -> "Archive"
@@ -475,7 +481,7 @@ fun SlipApp(repository: SlipRepository) {
             )
         },
         bottomBar = {
-            if (screen in setOf(Screen.HOME, Screen.SLIPS, Screen.REQUEST_MONEY, Screen.SETTINGS)) {
+            if (screen in setOf(Screen.HOME, Screen.BALANCE_HISTORY, Screen.SLIPS, Screen.REQUEST_MONEY, Screen.SETTINGS)) {
                 BottomNav(screen, onNavigate = { screen = it }, onScan = ::startScan)
             }
         }
@@ -486,15 +492,15 @@ fun SlipApp(repository: SlipRepository) {
                     repository = repository,
                     advances = advances,
                     slips = slips,
+                    refunds = refunds,
                     personalSummary = personalSummary,
-                    onAdvances = { screen = Screen.ADVANCES },
+                    onBalanceHistory = { screen = Screen.BALANCE_HISTORY },
+                    onRefunds = { screen = Screen.REFUNDS },
                     onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
                     onScan = ::startScan,
                     onRequestMoney = { screen = Screen.REQUEST_MONEY },
                     onCards = { repository.refreshCardDetails(); screen = Screen.CARDS },
-                    onHistory = { screen = Screen.SLIPS },
-                    onReports = { screen = Screen.REPORTS },
-                    onArchive = { screen = Screen.ARCHIVE }
+                    onReports = { screen = Screen.REPORTS }
                 )
                 Screen.REQUEST_MONEY -> MoneyRequestScreen(
                     requests = moneyRequests,
@@ -509,7 +515,19 @@ fun SlipApp(repository: SlipRepository) {
                     onUpdate = repository::acknowledgeCardUpdate,
                     onBack = { screen = Screen.HOME }
                 )
-                Screen.ADVANCES -> AdvancesScreen(repository, advances, slips, returns, onDone = { screen = Screen.HOME })
+                Screen.REFUNDS -> MyRefundsScreen(refunds, serverMessage, repository::refreshFunding, repository::requestRefundUpdate)
+                Screen.BALANCE_HISTORY -> BalanceHistoryScreen(
+                    repository, advances, slips, returns,
+                    onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
+                    onMissingPayment = { screen = Screen.MISSING_PAYMENT },
+                    onCompletedReports = { screen = Screen.ARCHIVE }
+                )
+                Screen.MISSING_PAYMENT -> MissingPaymentScreen(
+                    requests = moneyRequests,
+                    message = serverMessage,
+                    onReport = repository::reportPaymentReceived,
+                    onBack = { screen = Screen.BALANCE_HISTORY }
+                )
                 Screen.SLIPS -> SlipsScreen(
                     slips = slips,
                     onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
@@ -636,9 +654,9 @@ private fun BottomNav(screen: Screen, onNavigate: (Screen) -> Unit, onScan: () -
             icon = { Icon(Icons.Default.Home, null) }, label = { Text("Home") }
         )
         NavigationBarItem(
-            selected = screen == Screen.SLIPS,
-            onClick = { onNavigate(Screen.SLIPS) },
-            icon = { Icon(Icons.Default.ReceiptLong, null) }, label = { Text("History") }
+            selected = screen == Screen.BALANCE_HISTORY || screen == Screen.SLIPS,
+            onClick = { onNavigate(Screen.BALANCE_HISTORY) },
+            icon = { Icon(Icons.Default.ReceiptLong, null) }, label = { Text("Balance") }
         )
         NavigationBarItem(
             selected = false,
@@ -663,20 +681,22 @@ private fun HomeScreen(
     repository: SlipRepository,
     advances: List<Advance>,
     slips: List<Slip>,
+    refunds: List<Refund>,
     personalSummary: PersonalFundsSummary,
-    onAdvances: () -> Unit,
+    onBalanceHistory: () -> Unit,
+    onRefunds: () -> Unit,
     onSlip: (Slip) -> Unit,
     onScan: () -> Unit,
     onRequestMoney: () -> Unit,
     onCards: () -> Unit,
-    onHistory: () -> Unit,
-    onReports: () -> Unit,
-    onArchive: () -> Unit
+    onReports: () -> Unit
 ) {
     val session by repository.session.collectAsState()
     val moneyRequests by repository.moneyRequests.collectAsState()
     val serverMessage by repository.serverMessage.collectAsState()
     val outstanding = repository.activeReconciliation().outstandingCents.coerceAtLeast(0L)
+    val refundOutstanding = refunds.takeIf { it.isNotEmpty() }?.sumOf { it.outstandingCents + it.pendingCents }
+        ?: personalSummary.outstandingCents
     val pendingCount = slips.count { it.syncState != SyncState.SYNCED } +
         moneyRequests.count { it.syncState != SyncState.SYNCED }
     val firstName = session?.displayName?.trim()?.substringBefore(' ')?.ifBlank { "Employee" } ?: "Employee"
@@ -690,10 +710,10 @@ private fun HomeScreen(
             Text("Welcome, $firstName", style = MaterialTheme.typography.titleMedium)
         }
         item {
-            DashboardBalanceCard("Company money outstanding", money(outstanding), Color(0xFFEFFAF2), Color(0xFF07883F), onAdvances)
+            DashboardBalanceCard("Company money outstanding", money(outstanding), Color(0xFFEFFAF2), Color(0xFF07883F), onBalanceHistory)
         }
         item {
-            DashboardBalanceCard("Refunds owed to you", money(personalSummary.outstandingCents), Color(0xFFFFF1F1), Color(0xFFC9232B), onHistory)
+            DashboardBalanceCard("Refunds owed to you", money(refundOutstanding), Color(0xFFFFF1F1), Color(0xFFC9232B), onRefunds)
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -703,8 +723,8 @@ private fun HomeScreen(
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                EmployeeActionCard("Request Refund", "Get reimbursed for own expenses", Color(0xFFEA7100), Modifier.weight(1f), onHistory)
-                EmployeeActionCard("My Balance / History", "View your transactions", Color(0xFF7A42C3), Modifier.weight(1f), onHistory)
+                EmployeeActionCard("My Refunds", "Track refunds and request updates", Color(0xFFEA7100), Modifier.weight(1f), onRefunds)
+                EmployeeActionCard("My Balance / History", "Advances, balances and activity", Color(0xFF7A42C3), Modifier.weight(1f), onBalanceHistory)
             }
         }
         item {
@@ -734,18 +754,13 @@ private fun HomeScreen(
                     Column(Modifier.padding(12.dp)) {
                         Text("Money request", fontWeight = FontWeight.Bold)
                         Text("${request.purpose} • ${money(request.requestedCents)}")
-                        Text(syncLabel(request.syncState), style = MaterialTheme.typography.labelSmall)
+                        Text(if (request.serverId == null) syncLabel(request.syncState) else request.status.replace('_', ' '), style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
             items(recentSlips, key = { it.id }) { slip -> SlipCard(slip, onSlip) }
         }
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onReports, modifier = Modifier.weight(1f)) { Text("Reports") }
-                OutlinedButton(onClick = onArchive, modifier = Modifier.weight(1f)) { Text("Archive") }
-            }
-        }
+        item { OutlinedButton(onClick = onReports, modifier = Modifier.fillMaxWidth()) { Text("Reports") } }
     }
 }
 
@@ -883,7 +898,10 @@ private fun MoneyRequestScreen(
                         Text(money(request.requestedCents), fontWeight = FontWeight.Bold)
                     }
                     Text(request.projectSite)
-                    Text("Needed ${request.requiredDate} • ${syncLabel(request.syncState)}", style = MaterialTheme.typography.labelSmall)
+                    val requestState = if (request.serverId == null) syncLabel(request.syncState) else request.status.replace('_', ' ')
+                    Text("Needed ${request.requiredDate} • $requestState", style = MaterialTheme.typography.labelSmall)
+                    request.approvedCents?.let { Text("Approved ${money(it)}", style = MaterialTheme.typography.labelSmall) }
+                    if (request.accountantNote.isNotBlank()) Text("Accountant: ${request.accountantNote}", style = MaterialTheme.typography.bodySmall)
                     if (request.syncError.isNotBlank()) Text(request.syncError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -986,6 +1004,234 @@ private fun CompanyCardsScreen(
             }
         }
         item { OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to home") } }
+    }
+}
+
+@Composable
+private fun MyRefundsScreen(
+    refunds: List<Refund>,
+    message: String,
+    onRefresh: () -> Unit,
+    onRequestUpdate: (String) -> Unit
+) {
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("My Refunds", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("Refunds are created automatically whenever your own money pays all or part of a slip.")
+                }
+                TextButton(onClick = onRefresh) { Text("Refresh") }
+            }
+        }
+        if (message.isNotBlank()) item { Text(message, style = MaterialTheme.typography.bodySmall) }
+        if (refunds.isEmpty()) {
+            item { InfoCard("No refunds yet", "A refund will appear here automatically after a personal-money slip is synced.") }
+        }
+        items(refunds.sortedByDescending { it.openedAt }, key = { it.serverId }) { refund ->
+            val updateWaiting = refund.updateRequestedAt.isNotBlank() &&
+                (refund.accountantViewedAt.isBlank() || refund.updateRequestedAt > refund.accountantViewedAt)
+            val label = when {
+                refund.reimbursedCents > 0L && refund.outstandingCents == 0L && refund.pendingCents == 0L -> "Refunded"
+                refund.reimbursedCents > 0L && refund.outstandingCents > 0L -> "Partly refunded"
+                refund.pendingCents > 0L -> "Awaiting slip review"
+                refund.accountantViewedAt.isNotBlank() -> "Viewed by accountant/admin"
+                else -> "Submitted"
+            }
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text(money(refund.outstandingCents), fontWeight = FontWeight.Bold, color = if (refund.outstandingCents > 0L) Color(0xFFC9232B) else Color(0xFF07883F))
+                    }
+                    Text("Personal purchases ${money(refund.totalCents)}")
+                    Text("Approved ${money(refund.approvedCents)} • Refunded ${money(refund.reimbursedCents)}")
+                    if (refund.pendingCents > 0L) Text("Awaiting review ${money(refund.pendingCents)}")
+                    if (refund.accountantViewedAt.isNotBlank()) {
+                        Text(
+                            "Viewed by ${refund.accountantViewedByName.ifBlank { "accountant/admin" }} on ${displayTimestamp(refund.accountantViewedAt)}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    } else {
+                        Text("Not viewed yet", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (refund.reimbursedCents > 0L) {
+                        Text(
+                            "Refund recorded ${refund.lastReimbursedDate.ifBlank { displayTimestamp(refund.settledAt) }}" +
+                                refund.lastReimbursementReference.takeIf { it.isNotBlank() }?.let { " • Ref $it" }.orEmpty(),
+                            color = Color(0xFF07883F), fontWeight = FontWeight.Bold
+                        )
+                    }
+                    if (updateWaiting) {
+                        Text("Update requested ${displayTimestamp(refund.updateRequestedAt)}", color = Color(0xFFEA7100), fontWeight = FontWeight.Bold)
+                    }
+                    if (refund.status != "SETTLED" || refund.outstandingCents > 0L || refund.pendingCents > 0L) {
+                        OutlinedButton(
+                            onClick = { onRequestUpdate(refund.serverId) },
+                            enabled = !updateWaiting,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (updateWaiting) "Update requested" else "Request an update") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BalanceHistoryScreen(
+    repository: SlipRepository,
+    advances: List<Advance>,
+    slips: List<Slip>,
+    returns: List<MoneyReturn>,
+    onSlip: (Slip) -> Unit,
+    onMissingPayment: () -> Unit,
+    onCompletedReports: () -> Unit
+) {
+    val active = advances.filter { !it.archived && it.status in listOf("OPEN", "REOPENED") }
+    val completed = advances.filterNot { it in active }
+
+    fun remaining(advance: Advance): Long = if (advance.serverId != null) {
+        advance.remainingCents
+    } else {
+        repository.reconciliation(advance.id).outstandingCents.coerceAtLeast(0L)
+    }
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("My Balance / History", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Each advance shows the original amount paid and the amount still available.")
+        }
+        item { SectionTitle("Open advances") }
+        if (active.isEmpty()) item { InfoCard("No open advances", "A paid advance will appear here after the accountant/admin records it.") }
+        items(active, key = { "active-${it.id}" }) { advance ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(advance.project.ifBlank { "Advance ${advance.reference.ifBlank { "#${advance.id}" }}" }, fontWeight = FontWeight.Bold)
+                    Text("Paid ${dateText(advance.dateEpochDay)}${advance.reference.takeIf { it.isNotBlank() }?.let { " • Ref $it" }.orEmpty()}")
+                    Row(Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) { Text("Original", style = MaterialTheme.typography.labelMedium); Text(money(advance.amountCents), fontWeight = FontWeight.Bold) }
+                        Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) { Text("Remaining", style = MaterialTheme.typography.labelMedium); Text(money(remaining(advance)), fontWeight = FontWeight.Bold, color = Color(0xFF07883F)) }
+                    }
+                }
+            }
+        }
+        item {
+            OutlinedButton(onClick = onMissingPayment, modifier = Modifier.fillMaxWidth()) {
+                Text("Payment received but not showing?")
+            }
+        }
+        if (completed.isNotEmpty()) {
+            item { SectionTitle("Completed advances") }
+            items(completed, key = { "completed-${it.id}" }) { advance ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        Text(advance.project.ifBlank { "Advance ${advance.reference.ifBlank { "#${advance.id}" }}" }, fontWeight = FontWeight.Bold)
+                        Text("Original ${money(advance.amountCents)} • Remaining ${money(remaining(advance))}")
+                        Text("${dateText(advance.dateEpochDay)} • ${advance.status.replace('_', ' ')}", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+        item { OutlinedButton(onClick = onCompletedReports, modifier = Modifier.fillMaxWidth()) { Text("Completed reports") } }
+        item { SectionTitle("Transaction history") }
+        if (slips.isEmpty() && returns.isEmpty()) item { InfoCard("No transactions yet", "Your synced slips and returned money will appear here.") }
+        items(slips.sortedByDescending { it.createdAtMillis }, key = { "history-slip-${it.id}" }) { slip -> SlipCard(slip, onSlip) }
+        items(returns.sortedByDescending { it.dateEpochDay }, key = { "history-return-${it.id}" }) { returned ->
+            Card(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(14.dp)) {
+                    Column(Modifier.weight(1f)) { Text("Money returned", fontWeight = FontWeight.Bold); Text(dateText(returned.dateEpochDay)) }
+                    Text(money(returned.amountCents), fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MissingPaymentScreen(
+    requests: List<MoneyRequest>,
+    message: String,
+    onReport: (String, Long, String, String, String) -> Unit,
+    onBack: () -> Unit
+) {
+    val eligible = requests.filter { it.serverId != null && it.status in listOf("SUBMITTED", "APPROVED", "PART_APPROVED") }
+    var selectedId by remember(eligible) { mutableStateOf(eligible.firstOrNull()?.serverId) }
+    val selected = eligible.firstOrNull { it.serverId == selectedId }
+    var amount by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf(LocalDate.now().toString()) }
+    var reference by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
+    var confirmed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selected?.serverId) {
+        selected?.let {
+            amount = plainMoney(it.employeeReportedPaidCents ?: it.approvedCents ?: it.requestedCents)
+            date = it.employeeReportedPaidDate.ifBlank { LocalDate.now().toString() }
+            reference = it.employeeReportedPaymentReference
+            note = it.employeeReportedPaymentNote
+            confirmed = false
+        }
+    }
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("Payment received but missing", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Use this only when an accountant or administrator has already paid you, but the advance is not showing. This sends an audited correction request; it does not create a second advance.")
+        }
+        if (eligible.isEmpty()) {
+            item { InfoCard("No request available", "There must be an existing money request that has not already been recorded as paid.") }
+        } else {
+            item { SectionTitle("Select the related money request") }
+            items(eligible, key = { "missing-${it.serverId}" }) { request ->
+                Card(
+                    Modifier.fillMaxWidth().clickable { selectedId = request.serverId },
+                    colors = CardDefaults.cardColors(containerColor = if (selectedId == request.serverId) Color(0xFFEAF4FF) else MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        Row(Modifier.fillMaxWidth()) { Text(request.purpose, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); Text(money(request.requestedCents), fontWeight = FontWeight.Bold) }
+                        Text("${request.projectSite} • ${request.status.replace('_', ' ')}", style = MaterialTheme.typography.labelSmall)
+                        if (request.employeeReportedPaidAt.isNotBlank()) Text("Already reported ${displayTimestamp(request.employeeReportedPaidAt)}", color = Color(0xFFEA7100))
+                    }
+                }
+            }
+            item { MoneyField("Amount actually received", amount, { amount = it }) }
+            item { DateField(date, { date = it }) }
+            item { TextFieldSimple("Payment / bank reference", reference, { reference = it }) }
+            item { TextFieldSimple("Note (optional)", note, { note = it }) }
+            item {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = confirmed, onCheckedChange = { confirmed = it })
+                    Text("I confirm this money was already paid by an accountant or administrator.", modifier = Modifier.weight(1f))
+                }
+            }
+            item {
+                val cents = parseMoney(amount)
+                Button(
+                    onClick = {
+                        val requestId = selected?.serverId ?: return@Button
+                        onReport(requestId, cents ?: 0L, date, reference.trim(), note.trim())
+                        confirmed = false
+                    },
+                    enabled = selected != null && cents != null && cents > 0L && parseDate(date) != null && reference.isNotBlank() && confirmed,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Send correction to accountant/admin") }
+            }
+        }
+        if (message.isNotBlank()) item { Text(message, style = MaterialTheme.typography.bodySmall) }
+        item { OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to My Balance / History") } }
     }
 }
 
@@ -1999,10 +2245,14 @@ private fun shareFiles(context: android.content.Context, files: List<File>, mime
 private val zaLocale = Locale("en", "ZA")
 private val currencyFormat = NumberFormat.getCurrencyInstance(zaLocale)
 private val displayDate = DateTimeFormatter.ofPattern("dd MMM yyyy", zaLocale)
+private val displayDateTime = DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm", zaLocale)
 
 private fun money(cents: Long): String = currencyFormat.format(cents / 100.0)
 private fun plainMoney(cents: Long): String = String.format(Locale.US, "%.2f", cents / 100.0)
 private fun dateText(epochDay: Long): String = LocalDate.ofEpochDay(epochDay).format(displayDate)
+private fun displayTimestamp(value: String): String = runCatching {
+    Instant.parse(value).atZone(ZoneId.systemDefault()).format(displayDateTime)
+}.getOrElse { value.take(16).replace('T', ' ') }
 
 private fun parseMoney(text: String): Long? {
     val cleaned = text.trim().replace("R", "", ignoreCase = true).replace(" ", "")

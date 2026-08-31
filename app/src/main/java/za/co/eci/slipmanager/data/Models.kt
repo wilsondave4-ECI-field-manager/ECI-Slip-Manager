@@ -10,9 +10,11 @@ data class Advance(
     val serverId: String? = null,
     val dateEpochDay: Long,
     val amountCents: Long,
+    val remainingCents: Long = amountCents,
     val reference: String = "",
     val project: String = "",
     val notes: String = "",
+    val status: String = "OPEN",
     val archived: Boolean = false,
     val archivedAtMillis: Long? = null
 )
@@ -65,7 +67,32 @@ data class MoneyRequest(
     val projectSite: String = "",
     val requiredDate: String = "",
     val employeeNote: String = "",
+    val status: String = "SUBMITTED",
+    val approvedCents: Long? = null,
+    val accountantNote: String = "",
+    val employeeReportedPaidAt: String = "",
+    val employeeReportedPaidCents: Long? = null,
+    val employeeReportedPaidDate: String = "",
+    val employeeReportedPaymentReference: String = "",
+    val employeeReportedPaymentNote: String = "",
     val createdAtMillis: Long = System.currentTimeMillis()
+)
+
+data class Refund(
+    val serverId: String,
+    val status: String,
+    val openedAt: String,
+    val settledAt: String = "",
+    val totalCents: Long,
+    val approvedCents: Long,
+    val pendingCents: Long,
+    val reimbursedCents: Long,
+    val outstandingCents: Long,
+    val accountantViewedAt: String = "",
+    val accountantViewedByName: String = "",
+    val updateRequestedAt: String = "",
+    val lastReimbursedDate: String = "",
+    val lastReimbursementReference: String = ""
 )
 
 data class CompanyCardFundingRequest(

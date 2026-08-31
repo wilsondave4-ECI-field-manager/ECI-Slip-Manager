@@ -20,9 +20,11 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 server_id TEXT NULL UNIQUE,
                 date_epoch_day INTEGER NOT NULL,
                 amount_cents INTEGER NOT NULL,
+                remaining_cents INTEGER NOT NULL,
                 reference TEXT NOT NULL DEFAULT '',
                 project TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'OPEN',
                 archived INTEGER NOT NULL DEFAULT 0,
                 archived_at_millis INTEGER NULL
             )
@@ -72,6 +74,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         createReimbursementsTable(db)
         createCompanyCardsTable(db)
         createMoneyRequestsTable(db)
+        createRefundsTable(db)
         db.execSQL("CREATE INDEX idx_slips_advance ON slips(advance_id)")
         db.execSQL("CREATE INDEX idx_slips_supplier ON slips(supplier)")
         db.execSQL("CREATE UNIQUE INDEX idx_slips_client_uuid ON slips(client_uuid)")
@@ -118,11 +121,42 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 project_site TEXT NOT NULL DEFAULT '',
                 required_date TEXT NOT NULL DEFAULT '',
                 employee_note TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'SUBMITTED',
+                approved_cents INTEGER NULL,
+                accountant_note TEXT NOT NULL DEFAULT '',
+                employee_reported_paid_at TEXT NOT NULL DEFAULT '',
+                employee_reported_paid_cents INTEGER NULL,
+                employee_reported_paid_date TEXT NOT NULL DEFAULT '',
+                employee_reported_payment_reference TEXT NOT NULL DEFAULT '',
+                employee_reported_payment_note TEXT NOT NULL DEFAULT '',
                 created_at_millis INTEGER NOT NULL
             )
             """.trimIndent()
         )
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_money_requests_sync_state ON money_requests(sync_state)")
+    }
+
+    private fun createRefundsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS refunds (
+                server_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                opened_at TEXT NOT NULL,
+                settled_at TEXT NOT NULL DEFAULT '',
+                total_cents INTEGER NOT NULL,
+                approved_cents INTEGER NOT NULL,
+                pending_cents INTEGER NOT NULL,
+                reimbursed_cents INTEGER NOT NULL,
+                outstanding_cents INTEGER NOT NULL,
+                accountant_viewed_at TEXT NOT NULL DEFAULT '',
+                accountant_viewed_by_name TEXT NOT NULL DEFAULT '',
+                update_requested_at TEXT NOT NULL DEFAULT '',
+                last_reimbursed_date TEXT NOT NULL DEFAULT '',
+                last_reimbursement_reference TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent()
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -149,6 +183,20 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_slips_sync_state ON slips(sync_state)")
         }
         if (oldVersion < 5) createMoneyRequestsTable(db)
+        if (oldVersion < 6) {
+            db.execSQL("ALTER TABLE advances ADD COLUMN remaining_cents INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("UPDATE advances SET remaining_cents=amount_cents")
+            db.execSQL("ALTER TABLE advances ADD COLUMN status TEXT NOT NULL DEFAULT 'OPEN'")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN status TEXT NOT NULL DEFAULT 'SUBMITTED'")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN approved_cents INTEGER NULL")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN accountant_note TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN employee_reported_paid_at TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN employee_reported_paid_cents INTEGER NULL")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN employee_reported_paid_date TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN employee_reported_payment_reference TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN employee_reported_payment_note TEXT NOT NULL DEFAULT ''")
+            createRefundsTable(db)
+        }
     }
 
     fun getMoneyRequests(): List<MoneyRequest> = readableDatabase.query(
@@ -164,6 +212,14 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             projectSite = c.getString(c.getColumnIndexOrThrow("project_site")),
             requiredDate = c.getString(c.getColumnIndexOrThrow("required_date")),
             employeeNote = c.getString(c.getColumnIndexOrThrow("employee_note")),
+            status = c.getString(c.getColumnIndexOrThrow("status")),
+            approvedCents = c.getColumnIndexOrThrow("approved_cents").let { if (c.isNull(it)) null else c.getLong(it) },
+            accountantNote = c.getString(c.getColumnIndexOrThrow("accountant_note")),
+            employeeReportedPaidAt = c.getString(c.getColumnIndexOrThrow("employee_reported_paid_at")),
+            employeeReportedPaidCents = c.getColumnIndexOrThrow("employee_reported_paid_cents").let { if (c.isNull(it)) null else c.getLong(it) },
+            employeeReportedPaidDate = c.getString(c.getColumnIndexOrThrow("employee_reported_paid_date")),
+            employeeReportedPaymentReference = c.getString(c.getColumnIndexOrThrow("employee_reported_payment_reference")),
+            employeeReportedPaymentNote = c.getString(c.getColumnIndexOrThrow("employee_reported_payment_note")),
             createdAtMillis = c.getLong(c.getColumnIndexOrThrow("created_at_millis"))
         ))
     } }
@@ -175,7 +231,15 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("sync_state", item.syncState.name); put("sync_error", item.syncError)
             put("requested_cents", item.requestedCents); put("purpose", item.purpose)
             put("project_site", item.projectSite); put("required_date", item.requiredDate)
-            put("employee_note", item.employeeNote); put("created_at_millis", item.createdAtMillis)
+            put("employee_note", item.employeeNote); put("status", item.status)
+            if (item.approvedCents == null) putNull("approved_cents") else put("approved_cents", item.approvedCents)
+            put("accountant_note", item.accountantNote)
+            put("employee_reported_paid_at", item.employeeReportedPaidAt)
+            if (item.employeeReportedPaidCents == null) putNull("employee_reported_paid_cents") else put("employee_reported_paid_cents", item.employeeReportedPaidCents)
+            put("employee_reported_paid_date", item.employeeReportedPaidDate)
+            put("employee_reported_payment_reference", item.employeeReportedPaymentReference)
+            put("employee_reported_payment_note", item.employeeReportedPaymentNote)
+            put("created_at_millis", item.createdAtMillis)
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
@@ -206,9 +270,11 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         serverId = c.getColumnIndex("server_id").takeIf { it >= 0 && !c.isNull(it) }?.let(c::getString),
                         dateEpochDay = c.getLong(c.getColumnIndexOrThrow("date_epoch_day")),
                         amountCents = c.getLong(c.getColumnIndexOrThrow("amount_cents")),
+                        remainingCents = c.getLong(c.getColumnIndexOrThrow("remaining_cents")),
                         reference = c.getString(c.getColumnIndexOrThrow("reference")),
                         project = c.getString(c.getColumnIndexOrThrow("project")),
                         notes = c.getString(c.getColumnIndexOrThrow("notes")),
+                        status = c.getString(c.getColumnIndexOrThrow("status")),
                         archived = c.getInt(c.getColumnIndexOrThrow("archived")) != 0,
                         archivedAtMillis = if (c.isNull(archivedAtCol)) null else c.getLong(archivedAtCol)
                     )
@@ -297,14 +363,37 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
     }
 
+    fun getRefunds(): List<Refund> = readableDatabase.query(
+        "refunds", null, null, null, null, null, "opened_at DESC"
+    ).use { c -> buildList {
+        while (c.moveToNext()) add(Refund(
+            serverId = c.getString(c.getColumnIndexOrThrow("server_id")),
+            status = c.getString(c.getColumnIndexOrThrow("status")),
+            openedAt = c.getString(c.getColumnIndexOrThrow("opened_at")),
+            settledAt = c.getString(c.getColumnIndexOrThrow("settled_at")),
+            totalCents = c.getLong(c.getColumnIndexOrThrow("total_cents")),
+            approvedCents = c.getLong(c.getColumnIndexOrThrow("approved_cents")),
+            pendingCents = c.getLong(c.getColumnIndexOrThrow("pending_cents")),
+            reimbursedCents = c.getLong(c.getColumnIndexOrThrow("reimbursed_cents")),
+            outstandingCents = c.getLong(c.getColumnIndexOrThrow("outstanding_cents")),
+            accountantViewedAt = c.getString(c.getColumnIndexOrThrow("accountant_viewed_at")),
+            accountantViewedByName = c.getString(c.getColumnIndexOrThrow("accountant_viewed_by_name")),
+            updateRequestedAt = c.getString(c.getColumnIndexOrThrow("update_requested_at")),
+            lastReimbursedDate = c.getString(c.getColumnIndexOrThrow("last_reimbursed_date")),
+            lastReimbursementReference = c.getString(c.getColumnIndexOrThrow("last_reimbursement_reference"))
+        ))
+    } }
+
     fun upsertAdvance(item: Advance): Long {
         val values = ContentValues().apply {
             if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
             put("date_epoch_day", item.dateEpochDay)
             put("amount_cents", item.amountCents)
+            put("remaining_cents", item.remainingCents)
             put("reference", item.reference)
             put("project", item.project)
             put("notes", item.notes)
+            put("status", item.status)
             put("archived", if (item.archived) 1 else 0)
             if (item.archivedAtMillis == null) putNull("archived_at_millis") else put("archived_at_millis", item.archivedAtMillis)
         }
@@ -417,7 +506,12 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }, "id=?", arrayOf(id.toString()))
     }
 
-    fun replaceServerFunding(advances: List<Advance>, cards: List<CompanyCard>) {
+    fun replaceServerActivity(
+        advances: List<Advance>,
+        cards: List<CompanyCard>,
+        refunds: List<Refund>,
+        requests: List<MoneyRequest>
+    ) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -430,6 +524,21 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     put("reference", card.reference); put("balance_cents", card.balanceCents)
                 })
             }
+            db.delete("refunds", null, null)
+            refunds.forEach { item -> db.insertOrThrow("refunds", null, ContentValues().apply {
+                put("server_id", item.serverId); put("status", item.status)
+                put("opened_at", item.openedAt); put("settled_at", item.settledAt)
+                put("total_cents", item.totalCents); put("approved_cents", item.approvedCents)
+                put("pending_cents", item.pendingCents); put("reimbursed_cents", item.reimbursedCents)
+                put("outstanding_cents", item.outstandingCents)
+                put("accountant_viewed_at", item.accountantViewedAt)
+                put("accountant_viewed_by_name", item.accountantViewedByName)
+                put("update_requested_at", item.updateRequestedAt)
+                put("last_reimbursed_date", item.lastReimbursedDate)
+                put("last_reimbursement_reference", item.lastReimbursementReference)
+            }) }
+            db.delete("money_requests", "server_id IS NOT NULL", null)
+            requests.forEach(::upsertMoneyRequest)
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }
@@ -488,9 +597,11 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
                     put("date_epoch_day", item.dateEpochDay)
                     put("amount_cents", item.amountCents)
+                    put("remaining_cents", item.remainingCents)
                     put("reference", item.reference)
                     put("project", item.project)
                     put("notes", item.notes)
+                    put("status", item.status)
                     put("archived", if (item.archived) 1 else 0)
                     if (item.archivedAtMillis == null) putNull("archived_at_millis") else put("archived_at_millis", item.archivedAtMillis)
                 }
@@ -551,6 +662,6 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 5
+        private const val DB_VERSION = 6
     }
 }

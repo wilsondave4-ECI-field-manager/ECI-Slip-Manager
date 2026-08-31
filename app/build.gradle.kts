@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// v0.8.2 live employee activity refresh and truthful sync status
+// v0.9.0 employee refund tracking and advance balance history
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +19,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.8.2"
+        versionCode = 19
+        versionName = "0.9.0"
         buildConfigField(
             "String",
             "ECI_SERVER_URL",
