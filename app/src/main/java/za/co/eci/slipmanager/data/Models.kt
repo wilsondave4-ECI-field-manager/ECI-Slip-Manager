@@ -11,6 +11,8 @@ data class Advance(
     val dateEpochDay: Long,
     val amountCents: Long,
     val remainingCents: Long = amountCents,
+    val spentCents: Long = 0L,
+    val returnedCents: Long = 0L,
     val reference: String = "",
     val project: String = "",
     val notes: String = "",

@@ -21,6 +21,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 date_epoch_day INTEGER NOT NULL,
                 amount_cents INTEGER NOT NULL,
                 remaining_cents INTEGER NOT NULL,
+                spent_cents INTEGER NOT NULL DEFAULT 0,
+                returned_cents INTEGER NOT NULL DEFAULT 0,
                 reference TEXT NOT NULL DEFAULT '',
                 project TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
@@ -197,6 +199,10 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE money_requests ADD COLUMN employee_reported_payment_note TEXT NOT NULL DEFAULT ''")
             createRefundsTable(db)
         }
+        if (oldVersion < 7) {
+            db.execSQL("ALTER TABLE advances ADD COLUMN spent_cents INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE advances ADD COLUMN returned_cents INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     fun getMoneyRequests(): List<MoneyRequest> = readableDatabase.query(
@@ -271,6 +277,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         dateEpochDay = c.getLong(c.getColumnIndexOrThrow("date_epoch_day")),
                         amountCents = c.getLong(c.getColumnIndexOrThrow("amount_cents")),
                         remainingCents = c.getLong(c.getColumnIndexOrThrow("remaining_cents")),
+                        spentCents = c.getLong(c.getColumnIndexOrThrow("spent_cents")),
+                        returnedCents = c.getLong(c.getColumnIndexOrThrow("returned_cents")),
                         reference = c.getString(c.getColumnIndexOrThrow("reference")),
                         project = c.getString(c.getColumnIndexOrThrow("project")),
                         notes = c.getString(c.getColumnIndexOrThrow("notes")),
@@ -390,6 +398,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("date_epoch_day", item.dateEpochDay)
             put("amount_cents", item.amountCents)
             put("remaining_cents", item.remainingCents)
+            put("spent_cents", item.spentCents)
+            put("returned_cents", item.returnedCents)
             put("reference", item.reference)
             put("project", item.project)
             put("notes", item.notes)
@@ -662,6 +672,6 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 6
+        private const val DB_VERSION = 7
     }
 }

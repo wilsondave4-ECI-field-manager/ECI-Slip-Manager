@@ -117,7 +117,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
-private enum class Screen { HOME, REQUEST_MONEY, CARDS, REFUNDS, BALANCE_HISTORY, MISSING_PAYMENT, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
+private enum class Screen { HOME, REQUEST_MONEY, CARDS, ADVANCES, REFUNDS, BALANCE_HISTORY, MISSING_PAYMENT, SLIPS, REPORTS, ARCHIVE, SETTINGS, EDIT_SLIP }
 
 @Composable
 private fun ServerLoginScreen(
@@ -467,6 +467,7 @@ fun SlipApp(repository: SlipRepository) {
                     Screen.HOME -> "ECI Slip Manager"
                     Screen.REQUEST_MONEY -> "Request Money"
                     Screen.CARDS -> "Company Cards"
+                    Screen.ADVANCES -> "Advances / Money Received"
                     Screen.REFUNDS -> "My Refunds"
                     Screen.BALANCE_HISTORY -> "My Balance / History"
                     Screen.MISSING_PAYMENT -> "Payment Missing"
@@ -494,6 +495,7 @@ fun SlipApp(repository: SlipRepository) {
                     slips = slips,
                     refunds = refunds,
                     personalSummary = personalSummary,
+                    onAdvances = { screen = Screen.ADVANCES },
                     onBalanceHistory = { screen = Screen.BALANCE_HISTORY },
                     onRefunds = { screen = Screen.REFUNDS },
                     onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
@@ -516,6 +518,12 @@ fun SlipApp(repository: SlipRepository) {
                     onBack = { screen = Screen.HOME }
                 )
                 Screen.REFUNDS -> MyRefundsScreen(refunds, serverMessage, repository::refreshFunding, repository::requestRefundUpdate)
+                Screen.ADVANCES -> EmployeeAdvancesScreen(
+                    advances = advances,
+                    requests = moneyRequests,
+                    onRequestMoney = { screen = Screen.REQUEST_MONEY },
+                    onMissingPayment = { screen = Screen.MISSING_PAYMENT }
+                )
                 Screen.BALANCE_HISTORY -> BalanceHistoryScreen(
                     repository, advances, slips, returns,
                     onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
@@ -683,6 +691,7 @@ private fun HomeScreen(
     slips: List<Slip>,
     refunds: List<Refund>,
     personalSummary: PersonalFundsSummary,
+    onAdvances: () -> Unit,
     onBalanceHistory: () -> Unit,
     onRefunds: () -> Unit,
     onSlip: (Slip) -> Unit,
@@ -710,7 +719,7 @@ private fun HomeScreen(
             Text("Welcome, $firstName", style = MaterialTheme.typography.titleMedium)
         }
         item {
-            DashboardBalanceCard("Company money outstanding", money(outstanding), Color(0xFFEFFAF2), Color(0xFF07883F), onBalanceHistory)
+            DashboardBalanceCard("Company money outstanding", money(outstanding), Color(0xFFEFFAF2), Color(0xFF07883F), onAdvances)
         }
         item {
             DashboardBalanceCard("Refunds owed to you", money(refundOutstanding), Color(0xFFFFF1F1), Color(0xFFC9232B), onRefunds)
@@ -1083,6 +1092,65 @@ private fun MyRefundsScreen(
 }
 
 @Composable
+private fun EmployeeAdvancesScreen(
+    advances: List<Advance>,
+    requests: List<MoneyRequest>,
+    onRequestMoney: () -> Unit,
+    onMissingPayment: () -> Unit
+) {
+    val approvedRequests = requests.filter { it.serverId != null && it.status in listOf("APPROVED", "PART_APPROVED") }
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("Advances / Money Received", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Advances appear automatically after the accountant/admin records payment.")
+        }
+        item { Button(onClick = onRequestMoney, modifier = Modifier.fillMaxWidth()) { Text("Request money") } }
+        item { SectionTitle("Your advances") }
+        if (advances.isEmpty()) item { InfoCard("No money received yet", "Paid advances will appear here after the next sync.") }
+        items(advances, key = { "funding-${it.id}" }) { advance ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(advance.project.ifBlank { advance.reference.ifBlank { "Company advance" } }, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text("${money(advance.remainingCents)} left", fontWeight = FontWeight.Bold)
+                    }
+                    Text("${dateText(advance.dateEpochDay)} • ${advance.reference.ifBlank { "No payment reference" }}")
+                    Text("Original ${money(advance.amountCents)} • Used on slips ${money(advance.spentCents)}")
+                    Text("Returned ${money(advance.returnedCents)} • ${advance.status.replace('_', ' ')}")
+                }
+            }
+        }
+        if (approvedRequests.isNotEmpty()) {
+            item { SectionTitle("Approved payments not yet on advances") }
+            items(approvedRequests, key = { "approved-${it.serverId}" }) { request ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Row(Modifier.fillMaxWidth()) {
+                            Text(request.purpose, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text(money(request.approvedCents ?: request.requestedCents), fontWeight = FontWeight.Bold)
+                        }
+                        Text("${request.projectSite.ifBlank { "No project" }} • ${request.status.replace('_', ' ')}")
+                        if (request.employeeReportedPaidAt.isNotBlank()) Text("Payment received reported • waiting for accountant/admin verification", color = Color(0xFFEA7100))
+                    }
+                }
+            }
+            item {
+                OutlinedButton(onClick = onMissingPayment, modifier = Modifier.fillMaxWidth()) {
+                    Text("Payment received but missing")
+                }
+            }
+        }
+        item {
+            Text("Only use the missing-payment report after an accountant/admin has paid an approved or part-approved request and the advance is still absent.", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
 private fun BalanceHistoryScreen(
     repository: SlipRepository,
     advances: List<Advance>,
@@ -1121,6 +1189,8 @@ private fun BalanceHistoryScreen(
                         Column(Modifier.weight(1f)) { Text("Original", style = MaterialTheme.typography.labelMedium); Text(money(advance.amountCents), fontWeight = FontWeight.Bold) }
                         Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) { Text("Remaining", style = MaterialTheme.typography.labelMedium); Text(money(remaining(advance)), fontWeight = FontWeight.Bold, color = Color(0xFF07883F)) }
                     }
+                    Text("Used on slips ${money(advance.spentCents)} • Returned ${money(advance.returnedCents)}")
+                    Text(advance.status.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -1135,7 +1205,8 @@ private fun BalanceHistoryScreen(
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth().padding(14.dp)) {
                         Text(advance.project.ifBlank { "Advance ${advance.reference.ifBlank { "#${advance.id}" }}" }, fontWeight = FontWeight.Bold)
-                        Text("Original ${money(advance.amountCents)} • Remaining ${money(remaining(advance))}")
+                        Text("Original ${money(advance.amountCents)} • Used on slips ${money(advance.spentCents)}")
+                        Text("Returned ${money(advance.returnedCents)} • Remaining ${money(remaining(advance))}")
                         Text("${dateText(advance.dateEpochDay)} • ${advance.status.replace('_', ' ')}", style = MaterialTheme.typography.labelSmall)
                     }
                 }
@@ -1163,7 +1234,11 @@ private fun MissingPaymentScreen(
     onReport: (String, Long, String, String, String) -> Unit,
     onBack: () -> Unit
 ) {
-    val eligible = requests.filter { it.serverId != null && it.status in listOf("SUBMITTED", "APPROVED", "PART_APPROVED") }
+    val eligible = requests.filter {
+        it.serverId != null &&
+            it.status in listOf("APPROVED", "PART_APPROVED") &&
+            it.employeeReportedPaidAt.isBlank()
+    }
     var selectedId by remember(eligible) { mutableStateOf(eligible.firstOrNull()?.serverId) }
     val selected = eligible.firstOrNull { it.serverId == selectedId }
     var amount by remember { mutableStateOf("") }

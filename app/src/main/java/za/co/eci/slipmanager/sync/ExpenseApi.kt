@@ -88,6 +88,8 @@ class ExpenseApi {
                         dateEpochDay = date.toEpochDay(),
                         amountCents = o.optString("amount_cents", "0").toLongOrNull() ?: 0L,
                         remainingCents = o.optString("remaining_cents", "0").toLongOrNull() ?: 0L,
+                        spentCents = o.optString("spent_cents", "0").toLongOrNull() ?: 0L,
+                        returnedCents = o.optString("returned_cents", "0").toLongOrNull() ?: 0L,
                         reference = optionalString(o, "payment_reference"),
                         project = optionalString(o, "project_name").ifBlank { optionalString(o, "project_site") },
                         notes = optionalString(o, "accountant_note"),

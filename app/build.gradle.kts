@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// v0.9.0 employee refund tracking and advance balance history
+// v0.9.1 employee PWA alignment
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +19,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.9.0"
+        versionCode = 20
+        versionName = "0.9.1"
         buildConfigField(
             "String",
             "ECI_SERVER_URL",
