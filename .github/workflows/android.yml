@@ -64,5 +64,5 @@ jobs:
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: ECI-Slip-Manager-v0.9.1-signed
+          name: ECI-Slip-Manager-v0.9.2-signed
           path: app/build/outputs/apk/release/app-release.apk

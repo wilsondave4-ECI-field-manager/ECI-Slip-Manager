@@ -27,6 +27,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 project TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'OPEN',
+                settled_at TEXT NOT NULL DEFAULT '',
                 archived INTEGER NOT NULL DEFAULT 0,
                 archived_at_millis INTEGER NULL
             )
@@ -203,6 +204,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE advances ADD COLUMN spent_cents INTEGER NOT NULL DEFAULT 0")
             db.execSQL("ALTER TABLE advances ADD COLUMN returned_cents INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 8) {
+            db.execSQL("ALTER TABLE advances ADD COLUMN settled_at TEXT NOT NULL DEFAULT ''")
+        }
     }
 
     fun getMoneyRequests(): List<MoneyRequest> = readableDatabase.query(
@@ -283,6 +287,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         project = c.getString(c.getColumnIndexOrThrow("project")),
                         notes = c.getString(c.getColumnIndexOrThrow("notes")),
                         status = c.getString(c.getColumnIndexOrThrow("status")),
+                        settledAt = c.getString(c.getColumnIndexOrThrow("settled_at")),
                         archived = c.getInt(c.getColumnIndexOrThrow("archived")) != 0,
                         archivedAtMillis = if (c.isNull(archivedAtCol)) null else c.getLong(archivedAtCol)
                     )
@@ -404,6 +409,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("project", item.project)
             put("notes", item.notes)
             put("status", item.status)
+            put("settled_at", item.settledAt)
             put("archived", if (item.archived) 1 else 0)
             if (item.archivedAtMillis == null) putNull("archived_at_millis") else put("archived_at_millis", item.archivedAtMillis)
         }
@@ -672,6 +678,6 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 7
+        private const val DB_VERSION = 8
     }
 }

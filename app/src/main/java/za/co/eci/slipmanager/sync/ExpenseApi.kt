@@ -94,6 +94,7 @@ class ExpenseApi {
                         project = optionalString(o, "project_name").ifBlank { optionalString(o, "project_site") },
                         notes = optionalString(o, "accountant_note"),
                         status = optionalString(o, "status").ifBlank { "OPEN" },
+                        settledAt = optionalString(o, "settled_at"),
                         archived = !listOf("OPEN", "REOPENED").contains(optionalString(o, "status"))
                     ))
                 }

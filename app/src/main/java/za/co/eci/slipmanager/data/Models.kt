@@ -17,6 +17,7 @@ data class Advance(
     val project: String = "",
     val notes: String = "",
     val status: String = "OPEN",
+    val settledAt: String = "",
     val archived: Boolean = false,
     val archivedAtMillis: Long? = null
 )

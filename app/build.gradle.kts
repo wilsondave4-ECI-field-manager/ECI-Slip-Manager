@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// v0.9.1 employee PWA alignment
+// v0.9.2 settled advance display fix
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +19,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.9.1"
+        versionCode = 21
+        versionName = "0.9.2"
         buildConfigField(
             "String",
             "ECI_SERVER_URL",

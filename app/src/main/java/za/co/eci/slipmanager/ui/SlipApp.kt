@@ -1606,9 +1606,10 @@ private fun ArchiveScreen(
             items(archivedAdvances, key = { it.id }) { advance ->
                 val advanceSlips = slips.filter { it.advanceId == advance.id }
                 val advanceReturns = returns.filter { it.advanceId == advance.id }
-                val spent = advanceSlips.sumOf { it.companyPaidCents }
-                val returned = advanceReturns.sumOf { it.amountCents }
-                val balance = advance.amountCents - spent - returned
+                val spent = if (advance.serverId != null) advance.spentCents else advanceSlips.sumOf { it.companyPaidCents }
+                val returned = if (advance.serverId != null) advance.returnedCents else advanceReturns.sumOf { it.amountCents }
+                val balance = if (advance.serverId != null) advance.remainingCents else advance.amountCents - spent - returned
+                val settled = advance.status == "SETTLED" || balance == 0L
                 val savedEntry = advanceArchives.firstOrNull { it.advanceId == advance.id }
                 Card {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1617,15 +1618,16 @@ private fun ArchiveScreen(
                         Text("${dateText(advance.dateEpochDay)} • ${advance.reference.ifBlank { "No reference" }}")
                         Text("Received ${money(advance.amountCents)}")
                         Text("Slips ${money(spent)} • Returned ${money(returned)}")
+                        if (advance.settledAt.isNotBlank()) Text("Settled ${displayTimestamp(advance.settledAt)}")
                         if ((savedEntry?.personalTransferredCents ?: 0L) > 0L) {
                             Text("Transferred to Personal Funds ${money(savedEntry!!.personalTransferredCents)}")
                         }
                         Text(
-                            if (balance == 0L) "SETTLED • R0.00" else "OUTSTANDING • ${money(balance)}",
+                            if (settled) "SETTLED • R0.00" else "OUTSTANDING • ${money(balance)}",
                             fontWeight = FontWeight.Bold,
-                            color = if (balance == 0L) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            color = if (settled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                         )
-                        if (balance == 0L) {
+                        if (settled) {
                             OutlinedButton(
                                 onClick = {
                                     runCatching {
