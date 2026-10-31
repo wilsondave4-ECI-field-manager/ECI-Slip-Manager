@@ -132,6 +132,8 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 employee_reported_paid_date TEXT NOT NULL DEFAULT '',
                 employee_reported_payment_reference TEXT NOT NULL DEFAULT '',
                 employee_reported_payment_note TEXT NOT NULL DEFAULT '',
+                request_metadata TEXT NOT NULL DEFAULT '',
+
                 created_at_millis INTEGER NOT NULL
             )
             """.trimIndent()
@@ -161,6 +163,13 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             """.trimIndent()
         )
     }
+
+    private fun hasColumn(db: SQLiteDatabase, table: String, column: String): Boolean =
+        db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            var found = false
+            while (cursor.moveToNext()) if (cursor.getString(cursor.getColumnIndexOrThrow("name")) == column) found = true
+            found
+        }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
@@ -207,12 +216,17 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (oldVersion < 8) {
             db.execSQL("ALTER TABLE advances ADD COLUMN settled_at TEXT NOT NULL DEFAULT ''")
         }
+        if (oldVersion < 9 && !hasColumn(db, "money_requests", "request_metadata")) {
+            db.execSQL("ALTER TABLE money_requests ADD COLUMN request_metadata TEXT NOT NULL DEFAULT ''")
+        }
+
     }
 
     fun getMoneyRequests(): List<MoneyRequest> = readableDatabase.query(
         "money_requests", null, null, null, null, null, "created_at_millis DESC"
     ).use { c -> buildList {
         while (c.moveToNext()) add(MoneyRequest(
+            requestMetadata = c.getString(c.getColumnIndexOrThrow("request_metadata")),
             clientUuid = c.getString(c.getColumnIndexOrThrow("client_uuid")),
             serverId = c.getColumnIndexOrThrow("server_id").let { if (c.isNull(it)) null else c.getString(it) },
             syncState = runCatching { SyncState.valueOf(c.getString(c.getColumnIndexOrThrow("sync_state"))) }.getOrDefault(SyncState.PENDING),
@@ -237,6 +251,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     fun upsertMoneyRequest(item: MoneyRequest) {
         writableDatabase.insertWithOnConflict("money_requests", null, ContentValues().apply {
             put("client_uuid", item.clientUuid)
+            put("request_metadata", item.requestMetadata)
             if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
             put("sync_state", item.syncState.name); put("sync_error", item.syncError)
             put("requested_cents", item.requestedCents); put("purpose", item.purpose)
@@ -678,6 +693,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 8
+        private const val DB_VERSION = 9
+
     }
 }

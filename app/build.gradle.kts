@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// v0.9.2 settled advance display fix
+// v0.9.3 project funding requests; preserves settled advance and refund screens
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +19,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 21
-        versionName = "0.9.2"
+        versionCode = 22
+        versionName = "0.9.3"
         buildConfigField(
             "String",
             "ECI_SERVER_URL",
@@ -41,6 +41,7 @@ android {
     }
 
     buildTypes {
+        debug { applicationIdSuffix = ".linktest093" }
         release {
             isMinifyEnabled = false
             if (hasReleaseSigning) {

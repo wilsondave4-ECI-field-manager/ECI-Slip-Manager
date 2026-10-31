@@ -852,50 +852,109 @@ private fun InfoCard(title: String, body: String) {
 private fun SectionTitle(text: String) = Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
 @Composable
-private fun MoneyRequestScreen(
-    requests: List<MoneyRequest>,
-    onSave: (MoneyRequest) -> Unit,
-    onBack: () -> Unit
-) {
+private fun MoneyChoice(label: String, value: String, options: List<Pair<String, String>>, change: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+            Text("$label: ${options.find { it.first == value }?.second ?: "Select"}")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (id, text) -> DropdownMenuItem(text = { Text(text) }, onClick = { change(id); open = false }) }
+        }
+    }
+}
+
+@Composable
+private fun MoneyRequestScreen(requests: List<MoneyRequest>, onSave: (MoneyRequest) -> Unit, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val session = remember { za.co.eci.slipmanager.sync.SessionStore(context).load() }
+    val prefs = remember { context.getSharedPreferences("operations_projects", android.content.Context.MODE_PRIVATE) }
+    val cacheKey = "${session?.companyId}:${session?.userId}"
+    fun decodeProjects(raw: String): List<Pair<String, String>> = runCatching {
+        val array = org.json.JSONObject(raw).getJSONArray("projects")
+        (0 until array.length()).map { array.getJSONObject(it).let { p -> p.getString("id") to p.getString("name") } }
+    }.getOrDefault(emptyList())
+    var projects by remember { mutableStateOf(decodeProjects(prefs.getString(cacheKey, "").orEmpty())) }
+    var warning by remember { mutableStateOf("") }
+    LaunchedEffect(session?.userId, session?.companyId) {
+        if (session != null) {
+            try {
+                val raw = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { za.co.eci.slipmanager.sync.ExpenseApi().operationsProjects(session) }
+                projects = decodeProjects(raw)
+                prefs.edit().putString(cacheKey, raw).apply()
+                if (org.json.JSONObject(raw).optString("warning").isNotBlank()) warning = "Using the last synced project list."
+            } catch (_: Exception) { warning = "Using the last synced project list. Requests remain saved while offline." }
+        }
+    }
+    var type by remember { mutableStateOf("SUPPLIERS") }
+    var travel by remember { mutableStateOf("PROJECT") }
+    var related by remember { mutableStateOf("YES") }
+    var projectId by remember { mutableStateOf("") }
     var amount by remember { mutableStateOf("") }
     var purpose by remember { mutableStateOf("") }
-    var projectSite by remember { mutableStateOf("") }
     var requiredDate by remember { mutableStateOf(LocalDate.now().toString()) }
     var note by remember { mutableStateOf("") }
+    var breakdown by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var quotePath by remember { mutableStateOf("") }
+    var quoteName by remember { mutableStateOf("") }
+    var quoteType by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf("") }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) try {
+            val mime = context.contentResolver.getType(uri).orEmpty()
+            require(mime in listOf("application/pdf", "image/jpeg", "image/png")) { "Choose a PDF, JPG or PNG quote." }
+            val data = context.contentResolver.openInputStream(uri)?.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                while (true) { val size = input.read(buffer); if (size < 0) break; require(output.size() + size <= 12 * 1024 * 1024) { "Choose a quote up to 12 MB." }; output.write(buffer, 0, size) }
+                output.toByteArray()
+            } ?: error("Could not read quote")
+            require(data.size <= 12 * 1024 * 1024) { "Choose a quote up to 12 MB." }
+            val folder = File(context.filesDir, "request-quotes").apply { mkdirs() }
+            val file = File(folder, java.util.UUID.randomUUID().toString()).apply { writeBytes(data) }
+            val name = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else "Quote document" } ?: "Quote document"
+            quotePath = file.absolutePath; quoteName = name; quoteType = mime
+        } catch (failure: Exception) { error = failure.message ?: "Could not save quote" }
+    }
+    val projectRelated = if (type == "TRAVEL") travel == "PROJECT" else related == "YES"
+    val categories = listOf("fuel" to "Fuel", "accommodation" to "Accommodation", "material" to "Materials", "subcontractor" to "Subcontractors", "other" to "Other")
     val cents = parseMoney(amount)
-
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text("Ask for company funds", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text("Requests are saved on this phone first and sent automatically when there is a connection.")
-        }
-        item { MoneyField("Amount (R)", amount, { amount = it }, cents == null && amount.isNotBlank()) }
-        item { TextFieldSimple("Purpose", purpose, { purpose = it }) }
-        item { TextFieldSimple("Project / site (manual entry)", projectSite, { projectSite = it }) }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { Text("Ask for company funds", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text("Requests and quote documents are saved on this phone before syncing.") }
+        item { MoneyChoice("Request type", type, listOf("SUPPLIERS" to "Suppliers", "TRAVEL" to "Traveling", "MATERIAL" to "Spares/material")) { type = it } }
+        item { if (type == "TRAVEL") MoneyChoice("Travel type", travel, listOf("QUOTATION_VISIT" to "Quotation visit", "GENERAL" to "General traveling", "PROJECT" to "Project traveling")) { travel = it }
+            else MoneyChoice("Project expenditure", related, listOf("YES" to "Yes", "NO" to "No")) { related = it } }
+        if (projectRelated) item { MoneyChoice("Operations project", projectId, projects) { projectId = it }; Text("If missing, ask the administrator to add the project in Operations.") }
+        item { MoneyField("Amount requested (R)", amount, { amount = it }, cents == null && amount.isNotBlank()) }
+        if (projectRelated) items(categories) { (key, label) -> MoneyField("$label (R)", breakdown[key].orEmpty(), { breakdown = breakdown + (key to it) }, false) }
+        item { TextFieldSimple("Purpose / item details", purpose, { purpose = it }) }
+        if (type != "TRAVEL") item { OutlinedButton(onClick = { picker.launch(arrayOf("application/pdf", "image/jpeg", "image/png")) }, modifier = Modifier.fillMaxWidth()) { Text(if (quoteName.isBlank()) "Upload quote document" else quoteName) } }
         item { DateField(requiredDate, { requiredDate = it }) }
-        item { TextFieldSimple("Additional note (optional)", note, { note = it }) }
-        item {
-            Button(
-                onClick = {
-                    onSave(
-                        MoneyRequest(
-                            requestedCents = cents ?: 0L,
-                            purpose = purpose.trim(),
-                            projectSite = projectSite.trim(),
-                            requiredDate = requiredDate,
-                            employeeNote = note.trim()
-                        )
-                    )
-                    amount = ""; purpose = ""; projectSite = ""; note = ""
-                },
-                enabled = cents != null && cents > 0L && purpose.isNotBlank() && projectSite.isNotBlank(),
-                modifier = Modifier.fillMaxWidth().height(52.dp)
-            ) { Text("Send money request", fontWeight = FontWeight.Bold) }
-        }
+        item { TextFieldSimple("Additional note", note, { note = it }) }
+        if (warning.isNotBlank()) item { Text(warning) }
+        if (error.isNotBlank()) item { Text(error, color = MaterialTheme.colorScheme.error) }
+        item { Button(onClick = {
+            try {
+                require(cents != null && cents > 0) { "Enter a valid amount." }
+                require(purpose.isNotBlank()) { "Enter the purpose." }
+                require(!projectRelated || projects.any { it.first == projectId }) { "Select a listed Operations project." }
+                require(type == "TRAVEL" || quotePath.isNotBlank()) { "Upload a quote document." }
+                val lines = org.json.JSONArray()
+                var total = 0L
+                if (projectRelated) categories.forEach { (key, _) ->
+                    val value = breakdown[key].orEmpty()
+                    val line = if (value.isBlank()) 0L else parseMoney(value) ?: error("Enter valid category amounts.")
+                    require(line >= 0) { "Category amounts cannot be negative." }
+                    if (line > 0) { total += line; lines.put(org.json.JSONObject().put("category", key).put("amountCents", line)) }
+                }
+                require(!projectRelated || total == cents) { "Category amounts must total the requested amount." }
+                val metadata = org.json.JSONObject().put("ownerUserId", session?.userId).put("companyId", session?.companyId).put("requestType", type).put("projectRelated", projectRelated).put("projectId", if (projectRelated) projectId else org.json.JSONObject.NULL).put("expenseLines", lines)
+                if (type == "TRAVEL") metadata.put("travelType", travel)
+                else metadata.put("quotePath", quotePath).put("quoteName", quoteName).put("quoteType", quoteType)
+                onSave(MoneyRequest(requestedCents = cents, purpose = purpose.trim(), projectSite = if (projectRelated) projects.find { it.first == projectId }?.second.orEmpty() else "", requiredDate = requiredDate, employeeNote = note.trim(), requestMetadata = metadata.toString()))
+                amount = ""; purpose = ""; note = ""; quotePath = ""; quoteName = ""; breakdown = emptyMap(); error = ""
+            } catch (failure: Exception) { error = failure.message ?: "Could not save request." }
+        }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Save money request") } }
         item { OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to home") } }
         item { SectionTitle("My requests") }
         if (requests.isEmpty()) item { InfoCard("No requests yet", "Your money requests will appear here.") }
@@ -915,6 +974,7 @@ private fun MoneyRequestScreen(
                 }
             }
         }
+
     }
 }
 
