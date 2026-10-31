@@ -61,6 +61,7 @@ data class CompanyCard(
 )
 
 data class MoneyRequest(
+    val requestMetadata: String = "",
     val clientUuid: String = UUID.randomUUID().toString(),
     val serverId: String? = null,
     val syncState: SyncState = SyncState.PENDING,

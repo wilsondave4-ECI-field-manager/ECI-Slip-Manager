@@ -224,12 +224,34 @@ class ExpenseApi {
             .put("requestedCents", item.requestedCents)
             .put("requiredDate", nullableText(item.requiredDate))
             .put("purpose", item.purpose).put("employeeNote", nullableText(item.employeeNote))
+        if (item.requestMetadata.isNotBlank()) {
+            val metadata = JSONObject(item.requestMetadata)
+            require(metadata.optString("ownerUserId") == session.userId && metadata.optString("companyId") == session.companyId) { "This queued request belongs to a different employee or company. Sign in to its original account." }
+            for (key in listOf("requestType", "travelType", "projectRelated", "projectId", "expenseLines")) {
+                if (metadata.has(key)) body.put(key, metadata.get(key))
+            }
+            body.put("projectSite", JSONObject.NULL)
+            if (metadata.optString("quotePath").isNotBlank()) {
+                val document = File(metadata.getString("quotePath"))
+                require(document.isFile && document.length() <= 12 * 1024 * 1024) { "Stored quote is missing or too large" }
+                body.put("quote", JSONObject().put("name", metadata.getString("quoteName")).put("type", metadata.getString("quoteType")).put("content", android.util.Base64.encodeToString(document.readBytes(), android.util.Base64.NO_WRAP)))
+            }
+        }
         val request = authorized(session, "$base/sync/money-request")
             .header("Idempotency-Key", item.clientUuid).post(body.toString().toRequestBody(jsonType)).build()
         client.newCall(request).execute().use { response ->
             val payload = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw ApiException(response.code, errorMessage(payload, "Money request sync failed"))
             return JSONObject(payload).getString("serverId")
+        }
+    }
+
+    fun operationsProjects(session: ServerSession): String {
+        val request = authorized(session, "$base/operations/projects").get().build()
+        client.newCall(request).execute().use { response ->
+            val payload = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(response.code, "Could not refresh project list")
+            return payload
         }
     }
 

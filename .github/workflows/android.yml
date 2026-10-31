@@ -64,5 +64,31 @@ jobs:
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: ECI-Slip-Manager-v0.9.2-signed
+          name: ECI-Slip-Manager-v0.9.3-signed
           path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Verify upgrade signing identity and publish versioned download
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
+          test -n "$VERSION"
+          TAG="v$VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "This version already has a published download; retaining it unchanged."
+            exit 0
+          fi
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          PREVIOUS="$RUNNER_TEMP/eci-previous-release"
+          mkdir -p "$PREVIOUS"
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern ECI-Slip-Manager.apk --dir "$PREVIOUS"
+          CURRENT_CERT=$("$APKSIGNER" verify --print-certs "$PREVIOUS/ECI-Slip-Manager.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          NEXT_CERT=$("$APKSIGNER" verify --print-certs app/build/outputs/apk/release/app-release.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          test -n "$CURRENT_CERT"
+          test "$CURRENT_CERT" = "$NEXT_CERT" || { echo "Signing certificate differs from the installed release."; exit 1; }
+          cp app/build/outputs/apk/release/app-release.apk ECI-Slip-Manager.apk
+          sha256sum ECI-Slip-Manager.apk > SHA256SUMS.txt
+          printf '%s\n' "Project funding requests support Operations project selection, category amounts and quotes stored while offline." "Includes the previous refund and settled-advance fixes." "Install this update over the existing app to retain offline records. Do not uninstall the app." > "$RUNNER_TEMP/eci-release-notes.txt"
+          gh release create "$TAG" ECI-Slip-Manager.apk SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "ECI Slip Manager $VERSION" --notes-file "$RUNNER_TEMP/eci-release-notes.txt" --latest
