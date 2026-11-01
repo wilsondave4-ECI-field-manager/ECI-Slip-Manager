@@ -204,7 +204,7 @@ class ExpenseApi {
             .put("ocrText", nullableText(slip.ocrText))
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("metadata", metadata.toString())
-            .addFormDataPart("scan", "receipt-${slip.clientUuid}.jpg", image.asRequestBody("image/jpeg".toMediaType()))
+            .addFormDataPart("scan", "receipt-${slip.clientUuid}.${if (image.extension.equals("pdf", true)) "pdf" else "jpg"}", image.asRequestBody((if (image.extension.equals("pdf", true)) "application/pdf" else "image/jpeg").toMediaType()))
             .build()
         val request = authorized(session, "$base/sync/receipt")
             .header("Idempotency-Key", slip.clientUuid).post(multipart).build()

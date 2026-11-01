@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
                 }.toString()
                 File(filesDir, "last_crash.txt").writeText(
                     buildString {
-                        appendLine("ECI Slip Manager crash report")
+                        appendLine("ECI Expense Manager crash report")
                         appendLine("Time: ${LocalDateTime.now()}")
                         appendLine("App version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                         appendLine("Android: ${Build.VERSION.RELEASE} / SDK ${Build.VERSION.SDK_INT}")

@@ -1,6 +1,8 @@
 package za.co.eci.slipmanager.ui
 
 import android.Manifest
+import androidx.compose.runtime.DisposableEffect
+import za.co.eci.slipmanager.pdf.ReceiptDocument
 import android.app.Activity
 import android.app.DatePickerDialog
 import android.content.Intent
@@ -131,7 +133,7 @@ private fun ServerLoginScreen(
         Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center
     ) {
-        Text("ECI Slip Manager", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("ECI Expense Manager", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text("Sign in once to connect this phone. Afterwards, scanning and saving receipts works offline.")
         Spacer(Modifier.height(20.dp))
         OutlinedTextField(email, { email = it }, label = { Text("Work email") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -329,7 +331,7 @@ fun SlipApp(repository: SlipRepository) {
         }
     }
 
-    fun startScan() {
+    fun startCameraScan() {
         documentScanner.getStartScanIntent(activity)
             .addOnSuccessListener { intentSender ->
                 documentScannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
@@ -339,6 +341,40 @@ fun SlipApp(repository: SlipRepository) {
                 startFallbackCamera()
             }
     }
+
+    var showDocumentChoices by remember { mutableStateOf(false) }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) prepareBlackWhiteReceipt(uri)
+    }
+    val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            processingOcr = true
+            Thread {
+                val imported = runCatching { ReceiptDocument.importPdf(context, uri) }
+                activity.runOnUiThread {
+                    processingOcr = false
+                    imported.onSuccess { file ->
+                        editingSlip = Slip(imagePath = file.absolutePath, totalCents = 0L)
+                        screen = Screen.EDIT_SLIP
+                    }.onFailure { Toast.makeText(context, it.message ?: "Could not import PDF", Toast.LENGTH_LONG).show() }
+                }
+            }.start()
+        }
+    }
+    fun startScan() { if (!processingOcr) showDocumentChoices = true }
+
+    if (showDocumentChoices) AlertDialog(
+        onDismissRequest = { showDocumentChoices = false },
+        title = { Text("Add slip") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Scan a receipt, choose a saved photo, or upload an invoice / proof of payment PDF.")
+            Button(onClick = { showDocumentChoices = false; startCameraScan() }, modifier = Modifier.fillMaxWidth()) { Text("Scan with camera") }
+            OutlinedButton(onClick = { showDocumentChoices = false; photoPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Choose photo") }
+            OutlinedButton(onClick = { showDocumentChoices = false; pdfPicker.launch(arrayOf("application/pdf")) }, modifier = Modifier.fillMaxWidth()) { Text("Upload PDF (up to 12 MB)") }
+            Text("Submit an expense only once, not separately for its receipt and proof of payment.")
+        } },
+        confirmButton = { TextButton(onClick = { showDocumentChoices = false }) { Text("Cancel") } }
+    )
 
     LaunchedEffect(advances, slips, returns) {
         // Close active advances only after the exact company-funded balance reaches zero.
@@ -464,7 +500,7 @@ fun SlipApp(repository: SlipRepository) {
         topBar = {
             AppTopBar(
                 title = when (screen) {
-                    Screen.HOME -> "ECI Slip Manager"
+                    Screen.HOME -> "ECI Expense Manager"
                     Screen.REQUEST_MONEY -> "Request Money"
                     Screen.CARDS -> "Company Cards"
                     Screen.ADVANCES -> "Advances / Money Received"
@@ -621,10 +657,10 @@ fun SlipApp(repository: SlipRepository) {
         AlertDialog(
             onDismissRequest = { showPreviousCrash = false },
             title = { Text("Previous crash detected") },
-            text = { Text("ECI Slip Manager saved the Android crash details. Share the log so the exact cause can be fixed, or dismiss it to continue using the app.") },
+            text = { Text("ECI Expense Manager saved the Android crash details. Share the log so the exact cause can be fixed, or dismiss it to continue using the app.") },
             confirmButton = {
                 TextButton(onClick = {
-                    runCatching { shareFile(context, crashFile, "text/plain", "ECI Slip Manager Crash Log") }
+                    runCatching { shareFile(context, crashFile, "text/plain", "ECI Expense Manager Crash Log") }
                         .onFailure { Toast.makeText(context, "Could not share crash log: ${it.message}", Toast.LENGTH_LONG).show() }
                 }) { Text("Share crash log") }
             },
@@ -647,7 +683,7 @@ private fun AppTopBar(title: String, showSettings: Boolean, onSettings: () -> Un
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            if (title == "ECI Slip Manager") Text("Native • Offline-ready • VPS sync", style = MaterialTheme.typography.labelSmall)
+            if (title == "ECI Expense Manager") Text("Native • Offline-ready • VPS sync", style = MaterialTheme.typography.labelSmall)
         }
         if (showSettings) IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Settings") }
     }
@@ -1801,7 +1837,19 @@ private fun EditSlipScreen(
     var deleteConfirm by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        val bitmap = remember(original.imagePath) { BitmapFactory.decodeFile(original.imagePath) }
+        val isPdf = ReceiptDocument.isPdf(original.imagePath)
+        val bitmap = remember(original.imagePath) { runCatching {
+            if (isPdf) ReceiptDocument.preview(original.imagePath) else BitmapFactory.decodeFile(original.imagePath)
+        }.getOrNull() }
+        DisposableEffect(bitmap) { onDispose { bitmap?.recycle() } }
+        if (isPdf) {
+            InfoCard("PDF attached - all pages preserved", "Preview shows page 1. Enter details manually. Describe a proof of payment in the purpose; do not record its receipt again as another expense.")
+            OutlinedButton(onClick = {
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", File(original.imagePath))
+                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/pdf").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
+                    .onFailure { Toast.makeText(context, "No PDF viewer is installed. The complete PDF remains attached.", Toast.LENGTH_LONG).show() }
+            }) { Text("Open all PDF pages") }
+        }
         if (bitmap != null) {
             Image(
                 bitmap = bitmap.asImageBitmap(), contentDescription = "Receipt scan",
@@ -2191,7 +2239,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
         OutlinedButton(onClick = {
             runCatching {
                 val file = BackupManager.createBackup(context, advances, slips, returns, reimbursements)
-                shareFile(context, file, "application/zip", "ECI Slip Manager Backup")
+                shareFile(context, file, "application/zip", "ECI Expense Manager Backup")
             }.onFailure { Toast.makeText(context, "Backup failed: ${it.message}", Toast.LENGTH_LONG).show() }
         }, modifier = Modifier.fillMaxWidth()) { Text("Create & share backup ZIP") }
         OutlinedButton(onClick = { restorePicker.launch("application/zip") }, modifier = Modifier.fillMaxWidth()) { Text("Restore from backup ZIP") }
@@ -2236,7 +2284,7 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
                     OutlinedButton(onClick = {
                         runCatching {
                             val file = BackupManager.createBackup(context, advances, slips, returns, reimbursements)
-                            shareFile(context, file, "application/zip", "ECI Slip Manager Backup")
+                            shareFile(context, file, "application/zip", "ECI Expense Manager Backup")
                         }.onFailure { Toast.makeText(context, "Backup failed: ${it.message}", Toast.LENGTH_LONG).show() }
                     }, modifier = Modifier.fillMaxWidth()) { Text("Create backup first") }
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2350,7 +2398,7 @@ private fun launchPreparedReportEmail(
         putExtra(Intent.EXTRA_STREAM, uri)
         putExtra(Intent.EXTRA_EMAIL, arrayOf(officeEmail))
         putExtra(Intent.EXTRA_SUBJECT, "$reportName - $documentNumber")
-        putExtra(Intent.EXTRA_TEXT, "Please find attached $reportName $documentNumber generated by ECI Slip Manager.")
+        putExtra(Intent.EXTRA_TEXT, "Please find attached $reportName $documentNumber generated by ECI Expense Manager.")
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     context.startActivity(Intent.createChooser(intent, "Send $documentNumber"))
