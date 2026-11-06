@@ -41,6 +41,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 server_id TEXT NULL,
                 sync_state TEXT NOT NULL DEFAULT 'PENDING',
                 sync_error TEXT NOT NULL DEFAULT '',
+                upload_mutation_id TEXT NOT NULL DEFAULT '',
+                server_version TEXT NOT NULL DEFAULT '',
+                correction_reason TEXT NOT NULL DEFAULT '',
                 advance_id INTEGER NULL,
                 server_advance_id TEXT NULL,
                 server_card_id TEXT NULL,
@@ -220,6 +223,11 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE money_requests ADD COLUMN request_metadata TEXT NOT NULL DEFAULT ''")
         }
 
+        if (oldVersion < 10) {
+            db.execSQL("ALTER TABLE slips ADD COLUMN upload_mutation_id TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE slips ADD COLUMN server_version TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE slips ADD COLUMN correction_reason TEXT NOT NULL DEFAULT ''")
+        }
     }
 
     fun getMoneyRequests(): List<MoneyRequest> = readableDatabase.query(
@@ -332,6 +340,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                             runCatching { SyncState.valueOf(c.getString(it)) }.getOrDefault(SyncState.LOCAL_ONLY)
                         } ?: SyncState.LOCAL_ONLY,
                         syncError = c.getColumnIndex("sync_error").takeIf { it >= 0 }?.let(c::getString).orEmpty(),
+                        uploadMutationId = c.getString(c.getColumnIndexOrThrow("upload_mutation_id")),
+                        serverVersion = c.getString(c.getColumnIndexOrThrow("server_version")),
+                        correctionReason = c.getString(c.getColumnIndexOrThrow("correction_reason")),
                         advanceId = if (c.isNull(advanceCol)) null else c.getLong(advanceCol),
                         serverAdvanceId = c.getColumnIndex("server_advance_id").takeIf { it >= 0 && !c.isNull(it) }?.let(c::getString),
                         serverCardId = c.getColumnIndex("server_card_id").takeIf { it >= 0 && !c.isNull(it) }?.let(c::getString),
@@ -442,6 +453,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
             put("sync_state", item.syncState.name)
             put("sync_error", item.syncError)
+            put("upload_mutation_id", item.uploadMutationId)
+            put("server_version", item.serverVersion)
+            put("correction_reason", item.correctionReason)
             if (item.advanceId == null) putNull("advance_id") else put("advance_id", item.advanceId)
             if (item.serverAdvanceId == null) putNull("server_advance_id") else put("server_advance_id", item.serverAdvanceId)
             if (item.serverCardId == null) putNull("server_card_id") else put("server_card_id", item.serverCardId)
@@ -519,22 +533,22 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         it.syncState == SyncState.PENDING || it.syncState == SyncState.FAILED || it.syncState == SyncState.SYNCING
     }
 
-    fun markSlipSyncing(id: Long) {
+    fun markSlipSyncing(id: Long, mutation: String) {
         writableDatabase.update("slips", ContentValues().apply {
             put("sync_state", SyncState.SYNCING.name); put("sync_error", "")
-        }, "id=?", arrayOf(id.toString()))
+        }, "id=? AND upload_mutation_id=?", arrayOf(id.toString(), mutation))
     }
 
-    fun markSlipSynced(id: Long, serverId: String) {
+    fun markSlipSynced(id: Long, serverId: String, version: String, mutation: String) {
         writableDatabase.update("slips", ContentValues().apply {
-            put("server_id", serverId); put("sync_state", SyncState.SYNCED.name); put("sync_error", "")
-        }, "id=?", arrayOf(id.toString()))
+            put("server_id", serverId); put("server_version", version); put("sync_state", SyncState.SYNCED.name); put("sync_error", "")
+        }, "id=? AND upload_mutation_id=?", arrayOf(id.toString(), mutation))
     }
 
-    fun markSlipFailed(id: Long, error: String) {
+    fun markSlipFailed(id: Long, error: String, mutation: String) {
         writableDatabase.update("slips", ContentValues().apply {
             put("sync_state", SyncState.FAILED.name); put("sync_error", error.take(500))
-        }, "id=?", arrayOf(id.toString()))
+        }, "id=? AND upload_mutation_id=?", arrayOf(id.toString(), mutation))
     }
 
     fun replaceServerActivity(
@@ -546,8 +560,10 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete("advances", "server_id IS NOT NULL", null)
-            advances.forEach(::upsertAdvance)
+            advances.forEach { item ->
+                val existing = db.query("advances", arrayOf("id"), "server_id=?", arrayOf(item.serverId), null, null, null).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+                upsertAdvance(item.copy(id = existing))
+            }
             db.delete("company_cards", null, null)
             cards.forEach { card ->
                 db.insertOrThrow("company_cards", null, ContentValues().apply {
@@ -578,8 +594,10 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete("advances", "server_id IS NOT NULL", null)
-            advances.forEach(::upsertAdvance)
+            advances.forEach { item ->
+                val existing = db.query("advances", arrayOf("id"), "server_id=?", arrayOf(item.serverId), null, null, null).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+                upsertAdvance(item.copy(id = existing))
+            }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }
@@ -645,6 +663,9 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     if (item.serverId == null) putNull("server_id") else put("server_id", item.serverId)
                     put("sync_state", item.syncState.name)
                     put("sync_error", item.syncError)
+            put("upload_mutation_id", item.uploadMutationId)
+            put("server_version", item.serverVersion)
+            put("correction_reason", item.correctionReason)
                     if (item.advanceId == null) putNull("advance_id") else put("advance_id", item.advanceId)
                     if (item.serverAdvanceId == null) putNull("server_advance_id") else put("server_advance_id", item.serverAdvanceId)
                     if (item.serverCardId == null) putNull("server_card_id") else put("server_card_id", item.serverCardId)
@@ -693,7 +714,7 @@ class SlipDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     companion object {
         private const val DB_NAME = "eci_slips.db"
-        private const val DB_VERSION = 9
+        private const val DB_VERSION = 10
 
     }
 }

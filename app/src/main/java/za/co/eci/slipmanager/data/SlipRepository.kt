@@ -66,10 +66,29 @@ class SlipRepository(context: Context) {
     }
 
     fun saveAdvance(item: Advance): Long = db.upsertAdvance(item).also { refresh() }
+    fun prepareSlipForEdit(item: Slip, ready: (Slip) -> Unit) {
+        val session = _session.value
+        if (item.id == 0L || session == null) { ready(item); return }
+        _serverMessage.value = "Checking the original receipt…"
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { ExpenseApi().receiptState(session, item.clientUuid) } }
+                .onSuccess { state ->
+                    // Preserve the phone's edited fields, including unsent amounts.
+                    ready(item.copy(serverId = state.getString("serverId"), serverVersion = state.getString("version"), serverTotalCents = state.getLong("totalCents")))
+                    _serverMessage.value = "Original receipt checked. Corrections require a reason."
+                }
+                .onFailure {
+                    ready(item)
+                    _serverMessage.value = "Original receipt could not be checked. Offline work stays on this phone; an unknown version must be checked before correction sync."
+                }
+        }
+    }
+
     fun saveSlip(item: Slip): Long {
         val pending = item.copy(
-            syncState = if (item.serverId == null) SyncState.PENDING else item.syncState,
-            syncError = if (item.serverId == null) "" else item.syncError
+            syncState = SyncState.PENDING,
+            syncError = "",
+            uploadMutationId = java.util.UUID.randomUUID().toString()
         )
         return db.upsertSlip(pending).also {
             refresh()
@@ -135,7 +154,7 @@ class SlipRepository(context: Context) {
                         db.replaceServerActivity(funding.advances, funding.cards, funding.refunds, funding.moneyRequests)
                     }
                     refresh()
-                    _serverMessage.value = "Connected — advances and cards are up to date"
+                    _serverMessage.value = "Office balances downloaded. Receipt and request uploads are checked separately."
                     ReceiptSyncWorker.request(appContext)
                     refreshCardDetails()
                 }
@@ -194,7 +213,7 @@ class SlipRepository(context: Context) {
                     _cardDetails.value = details
                     withContext(Dispatchers.IO) { db.replaceCompanyCards(details.cards) }
                     refresh()
-                    _serverMessage.value = "Company cards are up to date"
+                    _serverMessage.value = "Card balances downloaded. Check the activity sync status for pending work."
                 }
                 .onFailure { _serverMessage.value = "Offline — showing the last saved card balances" }
         }

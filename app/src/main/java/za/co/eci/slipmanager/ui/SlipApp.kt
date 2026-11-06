@@ -534,7 +534,7 @@ fun SlipApp(repository: SlipRepository) {
                     onAdvances = { screen = Screen.ADVANCES },
                     onBalanceHistory = { screen = Screen.BALANCE_HISTORY },
                     onRefunds = { screen = Screen.REFUNDS },
-                    onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
+                    onSlip = { slip -> repository.prepareSlipForEdit(slip) { editingSlip = it; screen = Screen.EDIT_SLIP } },
                     onScan = ::startScan,
                     onRequestMoney = { screen = Screen.REQUEST_MONEY },
                     onCards = { repository.refreshCardDetails(); screen = Screen.CARDS },
@@ -562,7 +562,7 @@ fun SlipApp(repository: SlipRepository) {
                 )
                 Screen.BALANCE_HISTORY -> BalanceHistoryScreen(
                     repository, advances, slips, returns,
-                    onSlip = { editingSlip = it; screen = Screen.EDIT_SLIP },
+                    onSlip = { slip -> repository.prepareSlipForEdit(slip) { editingSlip = it; screen = Screen.EDIT_SLIP } },
                     onMissingPayment = { screen = Screen.MISSING_PAYMENT },
                     onCompletedReports = { screen = Screen.ARCHIVE }
                 )
@@ -574,7 +574,7 @@ fun SlipApp(repository: SlipRepository) {
                 )
                 Screen.SLIPS -> SlipsScreen(
                     slips = slips,
-                    onOpen = { editingSlip = it; screen = Screen.EDIT_SLIP }
+                    onOpen = { slip -> repository.prepareSlipForEdit(slip) { editingSlip = it; screen = Screen.EDIT_SLIP } }
                 )
                 Screen.REPORTS -> ReportsScreen(advances, slips, returns, reimbursements, personalArchiveStore, documentNumberStore)
                 Screen.ARCHIVE -> ArchiveScreen(repository, advances, slips, returns, reimbursements, personalArchiveStore, advanceArchiveStore, documentNumberStore, personalArchiveRevision)
@@ -742,8 +742,8 @@ private fun HomeScreen(
     val outstanding = repository.activeReconciliation().outstandingCents.coerceAtLeast(0L)
     val refundOutstanding = refunds.takeIf { it.isNotEmpty() }?.sumOf { it.outstandingCents + it.pendingCents }
         ?: personalSummary.outstandingCents
-    val pendingCount = slips.count { it.syncState != SyncState.SYNCED } +
-        moneyRequests.count { it.syncState != SyncState.SYNCED }
+    val pendingCount = slips.count { it.syncState != SyncState.SYNCED && it.syncState != SyncState.LOCAL_ONLY } +
+        moneyRequests.count { it.syncState != SyncState.SYNCED && it.syncState != SyncState.LOCAL_ONLY }
     val firstName = session?.displayName?.trim()?.substringBefore(' ')?.ifBlank { "Employee" } ?: "Employee"
 
     LazyColumn(
@@ -785,7 +785,13 @@ private fun HomeScreen(
                 }
             }
         }
-        if (serverMessage.isNotBlank() && serverMessage.contains("Offline", ignoreCase = true)) {
+        slips.firstOrNull { it.syncError.isNotBlank() }?.let { failed ->
+            item { InfoCard("Receipt needs attention: ${failed.supplier}", failed.syncError) }
+        }
+        if (slips.any { it.syncState == SyncState.LOCAL_ONLY }) {
+            item { Text("Legacy records are stored on this phone only; they are not included in the upload queue.", style = MaterialTheme.typography.bodySmall) }
+        }
+        if (serverMessage.isNotBlank()) {
             item { Text(serverMessage, style = MaterialTheme.typography.bodySmall) }
         }
         item { SectionTitle("Recent Activity") }
@@ -1819,6 +1825,7 @@ private fun EditSlipScreen(
     onCancel: () -> Unit
 ) {
     val context = LocalContext.current
+    var correctionReason by remember(original.id, original.imagePath) { mutableStateOf(original.correctionReason) }
     var supplier by remember(original.id, original.imagePath) { mutableStateOf(original.supplier) }
     var date by remember(original.id, original.imagePath) { mutableStateOf(original.dateEpochDay?.let { LocalDate.ofEpochDay(it).toString() } ?: "") }
     var receiptNo by remember(original.id, original.imagePath) { mutableStateOf(original.receiptNumber) }
@@ -1864,7 +1871,8 @@ private fun EditSlipScreen(
         MoneyField("VAT (confirm from receipt)", vat, { vat = it })
         MoneyField("Total *", total, { total = it }, error = total.isBlank())
         TextFieldSimple("Purpose / what was purchased for *", purpose, { purpose = it }, error = purpose.isBlank())
-        TextFieldSimple("Project / site", project, { project = it })
+        if (original.serverId == null) TextFieldSimple("Project / site", project, { project = it })
+        else Text("Project / site: ${project.ifBlank { "Not recorded" }}. Ask the accountant to change the project allocation.")
         TextFieldSimple("Payment reference", paymentRef, { paymentRef = it })
         PaymentTypePicker(paymentType) { selected ->
             paymentType = selected
@@ -1888,6 +1896,11 @@ private fun EditSlipScreen(
         } else if (paymentType == PaymentType.OWN) {
             Text("The full receipt total will be recorded as your own money and will not reduce an advance.", style = MaterialTheme.typography.bodySmall)
         }
+        if (original.serverId != null) {
+            Text("This updates the original receipt and returns it for accountant review. Its original document and history are retained.")
+            original.serverTotalCents?.let { Text("Current office amount: ${money(it)}. Check your amount against the receipt before saving.") }
+            TextFieldSimple("Reason for correction *", correctionReason, { correctionReason = it })
+        }
         Text("VAT is read from the slip when printed. If it is not printed, the app may calculate the South African 15% VAT portion when the receipt supports it. The VAT field stays editable; enter 0.00 for a zero-rated/no-VAT purchase.", style = MaterialTheme.typography.bodySmall)
         Button(
             modifier = Modifier.fillMaxWidth(),
@@ -1900,7 +1913,9 @@ private fun EditSlipScreen(
                     PaymentType.OWN -> totalCents ?: 0L
                     PaymentType.SPLIT -> parseMoney(ownMoney) ?: -1L
                 }
-                if (totalCents == null || totalCents <= 0) {
+                if (original.serverId != null && correctionReason.trim().length < 3) {
+                    Toast.makeText(context, "Enter a reason for this correction.", Toast.LENGTH_LONG).show()
+                } else if (totalCents == null || totalCents <= 0) {
                     Toast.makeText(context, "Total is required for reconciliation.", Toast.LENGTH_SHORT).show()
                 } else if (paymentType == PaymentType.SPLIT && (ownCents <= 0L || ownCents >= totalCents)) {
                     Toast.makeText(context, "Enter the part of the receipt that you paid yourself.", Toast.LENGTH_LONG).show()
@@ -1927,6 +1942,7 @@ private fun EditSlipScreen(
                             paymentType = paymentType,
                             ownMoneyCents = ownCents,
                             syncState = SyncState.PENDING,
+                            correctionReason = correctionReason.trim(),
                             syncError = ""
                         )
                     )
@@ -2137,7 +2153,8 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
     var clearSettings by remember { mutableStateOf(false) }
     val session by repository.session.collectAsState()
     val serverMessage by repository.serverMessage.collectAsState()
-    val pendingCount = slips.count { it.syncState != SyncState.SYNCED && it.syncState != SyncState.LOCAL_ONLY }
+    val requests by repository.moneyRequests.collectAsState()
+    val pendingCount = slips.count { it.syncState != SyncState.SYNCED && it.syncState != SyncState.LOCAL_ONLY } + requests.count { it.syncState != SyncState.SYNCED && it.syncState != SyncState.LOCAL_ONLY }
 
     val restorePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) {
@@ -2170,7 +2187,8 @@ private fun SettingsScreen(repository: SlipRepository, advances: List<Advance>, 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         SectionTitle("ECI server")
         Text("Signed in as ${session?.displayName ?: "Unknown"} • ${session?.email.orEmpty()}")
-        Text(if (pendingCount == 0) "All receipts synced" else "$pendingCount receipt(s) waiting to sync")
+        Text(if (pendingCount == 0) "All activity synced" else "$pendingCount receipt(s) / request(s) waiting to sync")
+        if (slips.any { it.syncState == SyncState.LOCAL_ONLY }) Text("Legacy records are stored on this phone only and are not counted as pending uploads.")
         if (serverMessage.isNotBlank()) Text(serverMessage, style = MaterialTheme.typography.bodySmall)
         Button(onClick = repository::syncNow, modifier = Modifier.fillMaxWidth()) { Text("Sync now") }
         OutlinedButton(onClick = repository::refreshFunding, modifier = Modifier.fillMaxWidth()) { Text("Refresh advances and cards") }

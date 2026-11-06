@@ -178,7 +178,15 @@ class ExpenseApi {
         postAuthorized(session, "$base/employee/money-requests/$requestId/payment-received", body, "Could not report the payment")
     }
 
-    fun uploadReceipt(session: ServerSession, slip: Slip): String {
+    fun receiptState(session: ServerSession, clientUuid: String): JSONObject {
+        client.newCall(authorized(session, "$base/sync/receipts/$clientUuid").get().build()).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(response.code, errorMessage(body, "Could not check the original receipt"))
+            return JSONObject(body)
+        }
+    }
+
+    fun uploadReceipt(session: ServerSession, slip: Slip): Pair<String, String> {
         val image = File(slip.imagePath)
         require(image.isFile) { "Stored receipt image is missing" }
         val source = when (slip.paymentType) {
@@ -202,18 +210,36 @@ class ExpenseApi {
             .put("purpose", slip.purpose)
             .put("paymentReference", nullableText(slip.paymentReference))
             .put("ocrText", nullableText(slip.ocrText))
+        if (slip.serverId != null) {
+            if (slip.serverVersion.isBlank() || slip.correctionReason.trim().length < 3)
+                throw ApiException(409, "Open this slip while connected, enter a correction reason and save again. Your receipt is retained.")
+            val body = JSONObject().put("receipt", metadata).put("expectedVersion", slip.serverVersion).put("reason", slip.correctionReason)
+            val request = authorized(session, "$base/sync/receipt-correction")
+                .header("Idempotency-Key", slip.uploadMutationId).post(body.toString().toRequestBody(jsonType)).build()
+            client.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw ApiException(response.code, errorMessage(text, "Receipt correction failed"))
+                val result = JSONObject(text)
+                if (!result.optBoolean("documentStored") || result.optLong("totalCents", -1) != slip.totalCents)
+                    throw ApiException(502, "The server has not confirmed this corrected amount")
+                return result.getString("serverId") to result.getString("version")
+            }
+        }
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("metadata", metadata.toString())
             .addFormDataPart("scan", "receipt-${slip.clientUuid}.${if (image.extension.equals("pdf", true)) "pdf" else "jpg"}", image.asRequestBody((if (image.extension.equals("pdf", true)) "application/pdf" else "image/jpeg").toMediaType()))
             .build()
         val request = authorized(session, "$base/sync/receipt")
-            .header("Idempotency-Key", slip.clientUuid).post(multipart).build()
+            .header("Idempotency-Key", slip.uploadMutationId.ifBlank { slip.clientUuid }).post(multipart).build()
         client.newCall(request).execute().use { response ->
             val payload = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw ApiException(response.code, errorMessage(payload, "Receipt sync failed"))
             val result = JSONObject(payload)
             if (!result.optBoolean("documentStored")) throw ApiException(502, "The server did not confirm receipt storage")
-            return result.getString("serverId")
+            val confirmed = receiptState(session, slip.clientUuid)
+            if (confirmed.getLong("totalCents") != slip.totalCents)
+                throw ApiException(409, "The office has a different amount. Open this slip while connected and save it with a correction reason. Your amount is retained.")
+            return result.getString("serverId") to confirmed.getString("version")
         }
     }
 
