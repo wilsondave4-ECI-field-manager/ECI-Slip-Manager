@@ -307,13 +307,40 @@ class ExpenseApi {
             val updatesJson = root.optJSONArray("updateRequests")
             val updates = buildList {
                 if (updatesJson != null) for (i in 0 until updatesJson.length()) updatesJson.getJSONObject(i).let { o -> add(CompanyCardUpdateRequest(
-                    id = o.getString("id"), cardName = o.getString("card_name"),
+                    id = o.getString("id"), cardId = o.getString("card_id"), cardName = o.getString("card_name"),
                     bankBalanceCents = optionalString(o, "bank_balance_cents").toLongOrNull(),
                     message = optionalString(o, "message"), requestedAt = o.getString("requested_at"),
                     acknowledged = !o.isNull("acknowledged_at")
                 )) }
             }
             return CompanyCardDetails(cards, requests, updates)
+        }
+    }
+
+    fun companyCardActivity(session: ServerSession, cardId: String): String {
+        java.util.UUID.fromString(cardId)
+        client.newCall(authorized(session, "$base/employee/company-cards/$cardId/activity").get().build()).execute().use { response ->
+            val payload = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(response.code, errorMessage(payload,"Could not load this card"))
+            return payload
+        }
+    }
+
+    fun downloadCardReceipt(session: ServerSession, slipId: String, directory: File): File {
+        java.util.UUID.fromString(slipId)
+        client.newCall(authorized(session, "$base/employee/slips/$slipId/document").get().build()).execute().use { response ->
+            if (!response.isSuccessful) throw ApiException(response.code,"Receipt could not be loaded; its record is retained")
+            val body = response.body ?: error("Receipt document is missing")
+            val extension = when (body.contentType()?.toString()?.substringBefore(';')) {
+                "application/pdf" -> "pdf"
+                "image/png" -> "png"
+                "image/jpeg" -> "jpg"
+                else -> error("Unsupported receipt document type")
+            }
+            val data = body.bytes()
+            require(data.isNotEmpty() && data.size <= 12 * 1024 * 1024) { "Receipt document is empty or exceeds 12 MB" }
+            directory.mkdirs()
+            return File(directory,"$slipId.$extension").also { it.writeBytes(data) }
         }
     }
 

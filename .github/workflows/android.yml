@@ -64,7 +64,7 @@ jobs:
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: ECI-Slip-Manager-v0.9.5-signed
+          name: ECI-Slip-Manager-v0.9.6-signed
           path: app/build/outputs/apk/release/app-release.apk
 
       - name: Verify upgrade signing identity and publish versioned download
@@ -90,5 +90,5 @@ jobs:
           test "$CURRENT_CERT" = "$NEXT_CERT" || { echo "Signing certificate differs from the installed release."; exit 1; }
           cp app/build/outputs/apk/release/app-release.apk ECI-Slip-Manager.apk
           sha256sum ECI-Slip-Manager.apk > SHA256SUMS.txt
-          printf '%s\n' "Receipt corrections update the original office slip, preserve evidence and record a correction reason." "Fixes pending sync counts and retains offline edits until the server confirms them." "Install this update over the existing app to retain offline records. Do not uninstall the app." > "$RUNNER_TEMP/eci-release-notes.txt"
+          printf '%s\n' "Select each company card to view its linked slips, funding and correction history." "Includes the previous receipt correction and offline sync fixes; card details can be saved per account for offline use." "Install this update over the existing app to retain offline records. Do not uninstall the app." > "$RUNNER_TEMP/eci-release-notes.txt"
           gh release create "$TAG" ECI-Slip-Manager.apk SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "ECI Slip Manager $VERSION" --notes-file "$RUNNER_TEMP/eci-release-notes.txt" --latest
