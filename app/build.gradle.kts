@@ -19,8 +19,8 @@ android {
         applicationId = "za.co.eci.slipmanager"
         minSdk = 26
         targetSdk = 36
-        versionCode = 23
-        versionName = "0.9.4"
+        versionCode = 24
+        versionName = "0.9.5"
         buildConfigField(
             "String",
             "ECI_SERVER_URL",
@@ -41,7 +41,7 @@ android {
     }
 
     buildTypes {
-        debug { applicationIdSuffix = ".linktest093" }
+        debug { applicationIdSuffix = ".synctest095" }
         release {
             isMinifyEnabled = false
             if (hasReleaseSigning) {
