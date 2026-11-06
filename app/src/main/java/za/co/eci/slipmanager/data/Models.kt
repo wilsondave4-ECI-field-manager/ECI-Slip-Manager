@@ -117,10 +117,12 @@ data class CompanyCardFundingRequest(
 data class CompanyCardUpdateRequest(
     val id: String,
     val cardName: String,
+    val cardId: String = "",
     val bankBalanceCents: Long? = null,
     val message: String = "",
     val requestedAt: String,
-    val acknowledged: Boolean = false
+    val acknowledged: Boolean = false,
+    val resolved: Boolean = false
 )
 
 data class CompanyCardDetails(
